@@ -128,8 +128,7 @@ class WSHeartbeatClient:
     + jitter (avoids a thundering herd when the server restarts).
 
     `metrics_provider` is an optional callable returning a dict of health metrics
-    (inference_latency_p95_ms, tokens_per_sec, llm_error_rate, session_cost_usd,
-    queue_depth) sent on each tick.
+    (inference_latency_p95_ms, llm_error_rate, queue_depth) sent on each tick.
     """
 
     def __init__(

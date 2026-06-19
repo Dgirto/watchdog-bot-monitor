@@ -54,3 +54,8 @@ class IHealthRepository(ABC):
 
     @abstractmethod
     async def find_recent(self, bot_id: str, environment: str, limit: int = 50) -> List[HealthMetrics]: ...
+
+    @abstractmethod
+    async def find_latest_all(self) -> List[HealthMetrics]:
+        """Most recent metric row per (bot_id, environment). Used by the dashboard."""
+        ...

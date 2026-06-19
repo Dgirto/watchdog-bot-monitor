@@ -9,10 +9,11 @@ import uuid
 
 from domain.entities.bot import Bot, BotEnvironment, BotStatus, Incident
 from domain.interfaces.repositories import IBotRepository, IIncidentRepository
+from infrastructure.config import settings
 from infrastructure.time import ensure_utc
 
 
-DB_PATH = "watchdog.db"
+DB_PATH = settings.DB_PATH
 
 # ──────────────────────────────────────────────────────────────────
 # Schema
@@ -174,6 +175,14 @@ class SqliteIncidentRepository(IIncidentRepository):
             ) as cursor:
                 row = await cursor.fetchone()
                 return self._row_to_incident(row) if row else None
+
+    async def find_active_bot_keys(self):
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT bot_id, environment FROM incidents WHERE recovered_at IS NULL"
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return {(r[0], r[1]) for r in rows}
 
     async def find_all(self, limit: int = 100) -> List[Incident]:
         async with aiosqlite.connect(DB_PATH) as db:

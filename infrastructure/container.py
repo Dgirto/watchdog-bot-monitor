@@ -3,7 +3,6 @@ infrastructure/container.py
 Builds and exposes all shared singletons.
 Import `container` anywhere you need a use case or manager.
 """
-from adapters.repositories.sqlite_repositories import SqliteBotRepository, SqliteIncidentRepository
 from notifications.manager import NotificationManager, LogChannel, WebhookChannel, SendGridEmailChannel
 from notifications.throttler import AlertThrottler
 from use_cases.watchdog import ProcessHeartbeatUseCase, RunWatchdogUseCase
@@ -12,9 +11,21 @@ from infrastructure.config import settings
 
 class Container:
     def __init__(self):
-        # Repositories
-        self.bot_repo = SqliteBotRepository()
-        self.incident_repo = SqliteIncidentRepository()
+        # Repositories — backend selected at startup; both honor the same ports.
+        if settings.DB_BACKEND == "postgres":
+            from adapters.repositories.postgres_repositories import (
+                PostgresBotRepository, PostgresIncidentRepository, init_db,
+            )
+            self.bot_repo = PostgresBotRepository()
+            self.incident_repo = PostgresIncidentRepository()
+            self.init_db = init_db
+        else:
+            from adapters.repositories.sqlite_repositories import (
+                SqliteBotRepository, SqliteIncidentRepository, init_db,
+            )
+            self.bot_repo = SqliteBotRepository()
+            self.incident_repo = SqliteIncidentRepository()
+            self.init_db = init_db
 
         # Real alert channels — email is primary, Slack/webhook secondary.
         alert_channels = []

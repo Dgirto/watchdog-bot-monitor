@@ -37,7 +37,11 @@ class Settings:
     HEARTBEAT_AUTH_MODE: str = os.getenv("HEARTBEAT_AUTH_MODE", "warn")
     AGENT_SHARED_SECRET: str | None = os.getenv("AGENT_SHARED_SECRET")
 
-    DB_PATH: str = os.getenv("DB_PATH", "watchdog.db")
+    # ── Database backend ─────────────────────────────────────────────
+    # sqlite (default) | postgres
+    DB_BACKEND: str = os.getenv("DB_BACKEND", "sqlite")
+    DB_PATH: str = os.getenv("DB_PATH", "watchdog.db")           # sqlite only
+    DATABASE_URL: str | None = os.getenv("DATABASE_URL")          # postgres only
 
 
 settings = Settings()

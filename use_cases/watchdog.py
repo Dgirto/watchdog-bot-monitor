@@ -117,32 +117,39 @@ class RunWatchdogUseCase:
         """Returns the number of bots newly marked as offline."""
         now = utcnow()
         bots = await self._bots.find_all()
+
+        # Single query for every open incident, instead of one lookup per bot
+        # (was N+1). The sweep is now 2 reads total + writes only for outages.
+        active_keys = await self._incidents.find_active_bot_keys()
         newly_offline = 0
 
         for bot in bots:
-            if bot.status != BotStatus.OFFLINE and bot.is_stale(self._timeout, self._grace, now):
-                previous_status = bot.status
-                bot.mark_offline()
-                await self._bots.update_status(bot.bot_id, bot.environment.value, BotStatus.OFFLINE.value)
+            if bot.status == BotStatus.OFFLINE or not bot.is_stale(self._timeout, self._grace, now):
+                continue
 
-                # Avoid duplicate open incidents
-                active = await self._incidents.find_active_incident(bot.bot_id, bot.environment.value)
-                if not active:
-                    incident = Incident(
-                        incident_id=str(uuid.uuid4()),
-                        bot_id=bot.bot_id,
-                        environment=bot.environment,
-                        offline_at=now,
-                    )
-                    await self._incidents.open_incident(incident)
+            previous_status = bot.status
+            bot.mark_offline()
+            await self._bots.update_status(bot.bot_id, bot.environment.value, BotStatus.OFFLINE.value)
 
-                    event = StatusChangeEvent(
-                        bot=bot,
-                        previous_status=previous_status,
-                        new_status=BotStatus.OFFLINE,
-                        occurred_at=now,
-                    )
-                    await self._notifications.notify(event)
-                    newly_offline += 1
+            # Avoid duplicate open incidents (in-memory check, no extra query)
+            if (bot.bot_id, bot.environment.value) in active_keys:
+                continue
+
+            incident = Incident(
+                incident_id=str(uuid.uuid4()),
+                bot_id=bot.bot_id,
+                environment=bot.environment,
+                offline_at=now,
+            )
+            await self._incidents.open_incident(incident)
+
+            event = StatusChangeEvent(
+                bot=bot,
+                previous_status=previous_status,
+                new_status=BotStatus.OFFLINE,
+                occurred_at=now,
+            )
+            await self._notifications.notify(event)
+            newly_offline += 1
 
         return newly_offline

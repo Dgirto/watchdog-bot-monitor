@@ -8,7 +8,6 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from adapters.repositories.sqlite_repositories import init_db
 from adapters.controllers.api import router
 from adapters.controllers.dashboard import dashboard_router
 from infrastructure.container import container
@@ -47,8 +46,8 @@ async def _watchdog_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    await init_db()
-    logger.info("Database initialised")
+    await container.init_db()
+    logger.info("Database initialised (backend=%s)", settings.DB_BACKEND)
     task = asyncio.create_task(_watchdog_loop())
     logger.info("Watchdog background task started")
     yield

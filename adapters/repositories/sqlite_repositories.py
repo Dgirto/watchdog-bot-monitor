@@ -8,7 +8,8 @@ from typing import List, Optional
 import uuid
 
 from domain.entities.bot import Bot, BotEnvironment, BotStatus, Incident
-from domain.interfaces.repositories import IBotRepository, IIncidentRepository
+from domain.entities.health import HealthMetrics
+from domain.interfaces.repositories import IBotRepository, IIncidentRepository, IHealthRepository
 from infrastructure.config import settings
 from infrastructure.time import ensure_utc
 
@@ -45,6 +46,20 @@ CREATE TABLE IF NOT EXISTS incidents (
 
 CREATE INDEX IF NOT EXISTS idx_incidents_bot ON incidents (bot_id, environment);
 CREATE INDEX IF NOT EXISTS idx_incidents_active ON incidents (recovered_at) WHERE recovered_at IS NULL;
+
+-- AI-agent health metrics (one row per WS health report)
+CREATE TABLE IF NOT EXISTS health_metrics (
+    bot_id                   TEXT NOT NULL,
+    environment              TEXT NOT NULL,
+    recorded_at              TEXT NOT NULL,           -- ISO-8601 UTC
+    inference_latency_p95_ms REAL,
+    tokens_per_sec           REAL,
+    llm_error_rate           REAL,
+    session_cost_usd         REAL,
+    queue_depth              INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_health_bot ON health_metrics (bot_id, environment, recorded_at DESC);
 """
 
 
@@ -193,3 +208,47 @@ class SqliteIncidentRepository(IIncidentRepository):
             ) as cursor:
                 rows = await cursor.fetchall()
                 return [self._row_to_incident(r) for r in rows]
+
+
+# ──────────────────────────────────────────────────────────────────
+# Health Metrics Repository
+# ──────────────────────────────────────────────────────────────────
+class SqliteHealthRepository(IHealthRepository):
+
+    def _row_to_metrics(self, row) -> HealthMetrics:
+        return HealthMetrics(
+            bot_id=row[0],
+            environment=BotEnvironment(row[1]),
+            recorded_at=ensure_utc(datetime.fromisoformat(row[2])),
+            inference_latency_p95_ms=row[3],
+            tokens_per_sec=row[4],
+            llm_error_rate=row[5],
+            session_cost_usd=row[6],
+            queue_depth=row[7],
+        )
+
+    async def save(self, metrics: HealthMetrics) -> None:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO health_metrics (bot_id, environment, recorded_at, "
+                "inference_latency_p95_ms, tokens_per_sec, llm_error_rate, "
+                "session_cost_usd, queue_depth) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    metrics.bot_id, metrics.environment.value, metrics.recorded_at.isoformat(),
+                    metrics.inference_latency_p95_ms, metrics.tokens_per_sec,
+                    metrics.llm_error_rate, metrics.session_cost_usd, metrics.queue_depth,
+                ),
+            )
+            await db.commit()
+
+    async def find_recent(self, bot_id: str, environment: str, limit: int = 50) -> List[HealthMetrics]:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT bot_id, environment, recorded_at, inference_latency_p95_ms, "
+                "tokens_per_sec, llm_error_rate, session_cost_usd, queue_depth "
+                "FROM health_metrics WHERE bot_id = ? AND environment = ? "
+                "ORDER BY recorded_at DESC LIMIT ?",
+                (bot_id, environment, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [self._row_to_metrics(r) for r in rows]

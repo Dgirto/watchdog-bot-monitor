@@ -1,187 +1,201 @@
-# 🐕 Watchdog — Bot Availability Monitor
+# 🐕 Watchdog — Monitor de Disponibilidad de Bots
 
-Lightweight uptime monitor for production bots. Zero hardware metrics.
-Pure availability tracking via heartbeat signals.
+Monitor ligero de uptime para bots en producción. Cero métricas de hardware.
+Seguimiento puro de disponibilidad mediante señales de *heartbeat*.
 
 ---
 
-## Database Schema
+## Esquema de Base de Datos
 
 ```sql
--- Registered bots and their current state
+-- Bots registrados y su estado actual
 CREATE TABLE bots (
     bot_id          TEXT    NOT NULL,
     name            TEXT    NOT NULL,
     environment     TEXT    NOT NULL,          -- prod | staging | dev
     status          TEXT    NOT NULL DEFAULT 'unknown',   -- online | offline | unknown
-    last_seen       TEXT,                      -- ISO-8601 UTC timestamp
+    last_seen       TEXT,                      -- timestamp ISO-8601 UTC
     registered_at   TEXT    NOT NULL,
-    PRIMARY KEY (bot_id, environment)          -- same bot can run in multiple envs
+    PRIMARY KEY (bot_id, environment)          -- un mismo bot puede correr en varios entornos
 );
 
--- One row per outage. Closed automatically on next heartbeat.
+-- Una fila por caída. Se cierra automáticamente con el siguiente heartbeat.
 CREATE TABLE incidents (
     incident_id      TEXT PRIMARY KEY,
     bot_id           TEXT NOT NULL,
     environment      TEXT NOT NULL,
-    offline_at       TEXT NOT NULL,            -- when watchdog detected the outage
-    recovered_at     TEXT,                     -- NULL while incident is active
-    downtime_seconds REAL,                     -- auto-calculated on recovery
+    offline_at       TEXT NOT NULL,            -- cuándo el watchdog detectó la caída
+    recovered_at     TEXT,                     -- NULL mientras el incidente está activo
+    downtime_seconds REAL,                     -- se calcula solo al recuperarse
     FOREIGN KEY (bot_id, environment) REFERENCES bots(bot_id, environment)
 );
 ```
 
 ---
 
-## Quick Start
+## Inicio Rápido
 
 ```bash
-# 1. Install dependencies
+# 1. Instalar dependencias
 pip install -r requirements.txt
 
-# 2. (Optional) configure via env vars
-export HEARTBEAT_TIMEOUT=60    # seconds without heartbeat → offline
-export GRACE_PERIOD=15         # extra buffer for network jitter
-export WATCHDOG_INTERVAL=30    # sweep frequency
+# 2. (Opcional) configurar mediante variables de entorno
+export HEARTBEAT_TIMEOUT=60    # segundos sin heartbeat → offline
+export GRACE_PERIOD=15         # margen extra para absorber jitter de red
+export WATCHDOG_INTERVAL=30    # frecuencia del barrido (sweep)
 
-# ── Heartbeat authentication (HMAC) ──────────────────────────────
+# ── Autenticación de heartbeats (HMAC) ───────────────────────────
 export HEARTBEAT_AUTH_MODE=warn          # off | warn | enforce
-export AGENT_SHARED_SECRET=change-me      # or per-agent: AGENT_SECRETS="bot1:s1,bot2:s2"
+export AGENT_SHARED_SECRET=cambiame       # o por agente: AGENT_SECRETS="bot1:s1,bot2:s2"
 
-# ── Alerts: email primary, Slack secondary ───────────────────────
+# ── Alertas: email primario, Slack secundario ────────────────────
 export SENDGRID_API_KEY=SG.xxxxx
-export ALERT_EMAIL_SENDER=watchdog@yourco.com
-export ALERT_EMAIL_RECIPIENTS=oncall@yourco.com,sre@yourco.com
-export ALERT_WEBHOOK_URL=https://hooks.slack.com/...   # optional
+export ALERT_EMAIL_SENDER=watchdog@tuempresa.com
+export ALERT_EMAIL_RECIPIENTS=guardia@tuempresa.com,sre@tuempresa.com
+export ALERT_WEBHOOK_URL=https://hooks.slack.com/...   # opcional
 
-# ── Smart alert thresholds (anti-glitch / anti-flapping) ─────────
-export ALERT_CONFIRM_SECONDS=90     # must stay offline this long before alerting
-export ALERT_COOLDOWN_SECONDS=300   # silence window after an alert
+# ── Umbrales inteligentes (anti-glitch / anti-flapping) ──────────
+export ALERT_CONFIRM_SECONDS=90     # debe seguir offline este tiempo antes de alertar
+export ALERT_COOLDOWN_SECONDS=300   # ventana de silencio tras una alerta
 
-# 3. Run
+# 3. Ejecutar
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-## Heartbeat Authentication (zero-downtime rollout)
+## Autenticación de Heartbeats (despliegue sin downtime)
 
-Heartbeats are signed with HMAC-SHA256 to stop spoofing. The client sends
-`X-Timestamp` and `X-Signature` headers (see `bot_client_example.py`, pass
-`secret=...`). Roll it out without breaking existing agents:
+Los heartbeats se firman con HMAC-SHA256 para evitar la suplantación (*spoofing*).
+El cliente envía las cabeceras `X-Timestamp` y `X-Signature` (ver
+`bot_client_example.py`, pasando `secret=...`). Despliégalo sin romper a los
+agentes existentes:
 
-1. **`warn`** (default) — server accepts signed *and* unsigned heartbeats, logging
-   a warning for unsigned ones. Update agents to sign at your own pace.
-2. **`enforce`** — once every agent signs, flip `HEARTBEAT_AUTH_MODE=enforce`.
-   Unsigned / bad-signature / stale (replay) heartbeats are rejected with `401`.
+1. **`warn`** (por defecto) — el servidor acepta heartbeats firmados *y* sin firmar,
+   registrando una advertencia para los no firmados. Actualiza los agentes a tu ritmo.
+2. **`enforce`** — cuando todos los agentes firmen, cambia a `HEARTBEAT_AUTH_MODE=enforce`.
+   Los heartbeats sin firma / con firma inválida / caducados (replay) se rechazan con `401`.
 
 ## API
 
-| Method | Path                       | Description                              |
-|--------|----------------------------|------------------------------------------|
-| WS     | /ws/agent                  | Real-time agent connection (heartbeat + health) |
-| POST   | /heartbeat                 | HTTP fallback — bot reports it is alive  |
-| GET    | /status                    | Full fleet status as JSON                |
-| GET    | /agents/{bot_id}/health    | Recent AI health metrics for an agent    |
-| GET    | /dashboard                 | Web UI with visual indicators            |
-| GET    | /health                    | Service liveness check                   |
-| GET    | /docs                      | Interactive API docs (Swagger UI)        |
+| Método | Ruta                       | Descripción                                       |
+|--------|----------------------------|---------------------------------------------------|
+| WS     | /ws/agent                  | Conexión de agente en tiempo real (heartbeat + salud) |
+| POST   | /heartbeat                 | Fallback HTTP — el bot reporta que está vivo       |
+| GET    | /status                    | Estado completo de la flota en JSON               |
+| GET    | /agents/{bot_id}/health    | Métricas de salud de IA recientes de un agente    |
+| GET    | /dashboard                 | Panel web con indicadores visuales                |
+| GET    | /health                    | Chequeo de vida del servicio                      |
+| GET    | /docs                      | Documentación interactiva de la API (Swagger UI)  |
 
-## Real-time monitoring over WebSocket
+## Monitoreo en tiempo real con WebSocket
 
-Agents connect to `/ws/agent` for low-latency monitoring; agents that can't speak
-WS keep using `POST /heartbeat` (both drive the same liveness logic, so there is
-one source of truth). The client auto-reconnects with exponential backoff + jitter.
+Los agentes se conectan a `/ws/agent` para un monitoreo de baja latencia; los
+agentes que no hablan WS siguen usando `POST /heartbeat` (ambos caminos usan la
+misma lógica de disponibilidad, así que hay una única fuente de verdad). El
+cliente se reconecta automáticamente con backoff exponencial + jitter.
 
-Handshake auth uses the same HMAC as HTTP, via query params (browsers can't set
-WS headers): `/ws/agent?bot_id=..&environment=..&ts=..&sig=..`
+La autenticación del handshake usa el mismo HMAC que HTTP, vía query params (los
+navegadores no pueden fijar cabeceras WS): `/ws/agent?bot_id=..&environment=..&ts=..&sig=..`
 
 ```jsonc
-// agent → server
+// agente → servidor
 { "type": "heartbeat", "seq": 1 }
 { "type": "health", "seq": 2, "metrics": { "tokens_per_sec": 47.3, "llm_error_rate": 0.01 } }
-// server → agent
+// servidor → agente
 { "type": "ack", "seq": 2 }
 ```
 
-### AI-agent health metrics
+### Métricas de salud de agente IA
 
-What separates an *AI agent* from a generic bot: it can be **online yet degraded
-or burning money**. Reported via the `health` message and stored per report:
+Lo que diferencia a un *agente de IA* de un bot genérico: puede estar **online pero
+degradado o quemando dinero**. Se reportan vía el mensaje `health` y se almacenan
+por cada reporte:
 
-| Metric | Meaning |
-|--------|---------|
-| `inference_latency_p95_ms` | LLM responsiveness |
-| `tokens_per_sec`           | Useful throughput |
-| `llm_error_rate`           | 0..1 — alive but failing |
-| `session_cost_usd`         | Runaway-cost guard |
-| `queue_depth`              | Backpressure / saturation |
+| Métrica | Significado |
+|---------|-------------|
+| `inference_latency_p95_ms` | Capacidad de respuesta del LLM |
+| `tokens_per_sec`           | Throughput útil de trabajo |
+| `llm_error_rate`           | 0..1 — vivo pero fallando |
+| `session_cost_usd`         | Control de costo descontrolado |
+| `queue_depth`              | Saturación / backpressure |
 
-Anomalies (e.g. error rate > 5%, cost spikes) are flagged in the logs.
+Las anomalías (p. ej. tasa de error > 5%, picos de costo) se marcan en los logs.
 
-## Project Structure
+## Estructura del Proyecto
 
 ```
 watchdog/
 ├── domain/
-│   ├── entities/bot.py          # Bot, Incident — pure Python, no deps
-│   ├── entities/health.py       # HealthMetrics — AI-agent metrics
-│   └── interfaces/repositories.py  # Abstract ports (bot, incident, health)
+│   ├── entities/bot.py          # Bot, Incident — Python puro, sin dependencias
+│   ├── entities/health.py       # HealthMetrics — métricas de agente IA
+│   └── interfaces/repositories.py  # Puertos abstractos (bot, incident, health)
 ├── use_cases/
 │   ├── watchdog.py              # ProcessHeartbeat, RunWatchdog
-│   └── health.py               # RecordHealth + anomaly detection
+│   └── health.py               # RecordHealth + detección de anomalías
 ├── adapters/
 │   ├── repositories/
-│   │   ├── sqlite_repositories.py    # SQLite backend
-│   │   └── postgres_repositories.py  # PostgreSQL backend (asyncpg)
+│   │   ├── sqlite_repositories.py    # Backend SQLite
+│   │   └── postgres_repositories.py  # Backend PostgreSQL (asyncpg)
 │   └── controllers/
 │       ├── api.py               # POST /heartbeat, GET /status, GET /agents/{id}/health
-│       ├── auth.py              # HMAC verification (HTTP + WS)
-│       ├── ws.py                # WS /ws/agent — real-time transport
+│       ├── auth.py              # Verificación HMAC (HTTP + WS)
+│       ├── ws.py                # WS /ws/agent — transporte en tiempo real
 │       └── dashboard.py         # GET /dashboard
 ├── notifications/
-│   ├── manager.py               # NotificationManager + channels (Log/Email/Webhook)
-│   └── throttler.py             # Smart alert thresholds (debounce + cooldown)
+│   ├── manager.py               # NotificationManager + canales (Log/Email/Webhook)
+│   └── throttler.py             # Umbrales inteligentes (debounce + cooldown)
 ├── infrastructure/
-│   ├── config.py                # Settings from env vars
-│   ├── secrets.py               # Per-agent / shared HMAC secrets
-│   ├── time.py                  # tz-aware UTC helpers
-│   ├── ws_manager.py            # Live WS connections, rooms per agent
-│   └── container.py             # Dependency injection wiring
-├── bot_client_example.py        # HTTP + WebSocket heartbeat clients
-├── main.py                      # FastAPI app + watchdog background task
+│   ├── config.py                # Configuración desde variables de entorno
+│   ├── secrets.py               # Secretos HMAC por agente / compartidos
+│   ├── time.py                  # Helpers UTC con zona horaria
+│   ├── ws_manager.py            # Conexiones WS vivas, rooms por agente
+│   └── container.py             # Cableado de inyección de dependencias
+├── bot_client_example.py        # Clientes de heartbeat HTTP + WebSocket
+├── main.py                      # App FastAPI + tarea en segundo plano del watchdog
 └── requirements.txt
 ```
 
-## Adding a Notification Channel
+## Pruebas
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+29 tests que cubren seguridad (HMAC, validación), escalabilidad (eliminación del
+N+1), alertas (throttler), WebSocket y métricas de IA. No requieren servicios
+externos (usan SQLite + el TestClient ASGI).
+
+## Añadir un Canal de Notificación
 
 ```python
 # notifications/manager.py
-class MyCustomChannel(NotificationChannel):
+class MiCanalPersonalizado(NotificationChannel):
     async def send(self, event: StatusChangeEvent) -> None:
-        # your logic: PagerDuty, Telegram, SMS, etc.
+        # tu lógica: PagerDuty, Telegram, SMS, etc.
         ...
 
-# infrastructure/container.py — add to channels list
-channels.append(MyCustomChannel(...))
+# infrastructure/container.py — añadir a la lista de canales
+channels.append(MiCanalPersonalizado(...))
 ```
 
-## Database Backend (SQLite or PostgreSQL)
+## Backend de Base de Datos (SQLite o PostgreSQL)
 
-Selected at startup with `DB_BACKEND`; both implement the same ports, so no
-business logic changes.
+Se elige al arrancar con `DB_BACKEND`; ambos implementan los mismos puertos, así
+que no cambia la lógica de negocio.
 
 ```bash
-# Default — zero config
+# Por defecto — sin configuración
 export DB_BACKEND=sqlite
 export DB_PATH=watchdog.db
 
-# Production — concurrent writes, connection pool, HA-ready
+# Producción — escrituras concurrentes, pool de conexiones, listo para HA
 export DB_BACKEND=postgres
 export DATABASE_URL=postgresql://user:pass@localhost:5432/watchdog
-pip install asyncpg   # only needed for the postgres backend
+pip install asyncpg   # solo necesario para el backend de postgres
 ```
 
-`PostgresBotRepository`/`PostgresIncidentRepository` use an `asyncpg` pool and
-`TIMESTAMPTZ` columns. The schema is created automatically on startup.
+`PostgresBotRepository`/`PostgresIncidentRepository` usan un pool de `asyncpg` y
+columnas `TIMESTAMPTZ`. El esquema se crea automáticamente al arrancar.
 
-To add another backend (MySQL, etc.), implement `IBotRepository` and
-`IIncidentRepository` and wire it in `infrastructure/container.py`.
+Para añadir otro backend (MySQL, etc.), implementa `IBotRepository` e
+`IIncidentRepository` y cablea en `infrastructure/container.py`.

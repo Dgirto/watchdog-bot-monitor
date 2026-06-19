@@ -10,6 +10,7 @@ from fastapi import FastAPI
 
 from adapters.controllers.api import router
 from adapters.controllers.dashboard import dashboard_router
+from adapters.controllers.ws import ws_router
 from infrastructure.container import container
 from infrastructure.config import settings
 
@@ -75,6 +76,7 @@ app = FastAPI(
 
 app.include_router(router)
 app.include_router(dashboard_router)
+app.include_router(ws_router)
 
 
 @app.get("/health", tags=["Health"])

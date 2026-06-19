@@ -6,6 +6,7 @@ Import `container` anywhere you need a use case or manager.
 from notifications.manager import NotificationManager, LogChannel, WebhookChannel, SendGridEmailChannel
 from notifications.throttler import AlertThrottler
 from use_cases.watchdog import ProcessHeartbeatUseCase, RunWatchdogUseCase
+from use_cases.health import RecordHealthUseCase
 from infrastructure.config import settings
 
 
@@ -14,17 +15,21 @@ class Container:
         # Repositories — backend selected at startup; both honor the same ports.
         if settings.DB_BACKEND == "postgres":
             from adapters.repositories.postgres_repositories import (
-                PostgresBotRepository, PostgresIncidentRepository, init_db,
+                PostgresBotRepository, PostgresIncidentRepository,
+                PostgresHealthRepository, init_db,
             )
             self.bot_repo = PostgresBotRepository()
             self.incident_repo = PostgresIncidentRepository()
+            self.health_repo = PostgresHealthRepository()
             self.init_db = init_db
         else:
             from adapters.repositories.sqlite_repositories import (
-                SqliteBotRepository, SqliteIncidentRepository, init_db,
+                SqliteBotRepository, SqliteIncidentRepository,
+                SqliteHealthRepository, init_db,
             )
             self.bot_repo = SqliteBotRepository()
             self.incident_repo = SqliteIncidentRepository()
+            self.health_repo = SqliteHealthRepository()
             self.init_db = init_db
 
         # Real alert channels — email is primary, Slack/webhook secondary.
@@ -63,6 +68,7 @@ class Container:
             timeout_seconds=settings.HEARTBEAT_TIMEOUT_SECONDS,
             grace_seconds=settings.GRACE_PERIOD_SECONDS,
         )
+        self.record_health = RecordHealthUseCase(health_repo=self.health_repo)
 
 
 container = Container()

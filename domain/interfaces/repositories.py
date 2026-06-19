@@ -5,6 +5,7 @@ Abstract ports — the contract, not the implementation.
 from abc import ABC, abstractmethod
 from typing import List, Optional, Set, Tuple
 from domain.entities.bot import Bot, Incident
+from domain.entities.health import HealthMetrics
 
 
 class IBotRepository(ABC):
@@ -44,3 +45,12 @@ class IIncidentRepository(ABC):
 
     @abstractmethod
     async def find_all(self, limit: int = 100) -> List[Incident]: ...
+
+
+class IHealthRepository(ABC):
+
+    @abstractmethod
+    async def save(self, metrics: HealthMetrics) -> None: ...
+
+    @abstractmethod
+    async def find_recent(self, bot_id: str, environment: str, limit: int = 50) -> List[HealthMetrics]: ...

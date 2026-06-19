@@ -91,6 +91,17 @@ class FleetStatusOut(BaseModel):
     recent_incidents: List[IncidentOut]
 
 
+class HealthMetricsOut(BaseModel):
+    bot_id: str
+    environment: str
+    recorded_at: datetime
+    inference_latency_p95_ms: Optional[float] = None
+    tokens_per_sec: Optional[float] = None
+    llm_error_rate: Optional[float] = None
+    session_cost_usd: Optional[float] = None
+    queue_depth: Optional[int] = None
+
+
 # ─────────────────────────── Routes ──────────────────────────────
 
 @router.post(
@@ -165,3 +176,28 @@ async def fleet_status() -> FleetStatusOut:
             for i in incidents
         ],
     )
+
+
+@router.get(
+    "/agents/{bot_id}/health",
+    response_model=List[HealthMetricsOut],
+    summary="Recent AI health metrics for an agent",
+    tags=["Monitoring"],
+)
+async def agent_health(bot_id: str, environment: str, limit: int = 50) -> List[HealthMetricsOut]:
+    if environment not in VALID_ENVS:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "invalid environment")
+    metrics = await container.health_repo.find_recent(bot_id, environment, limit=min(limit, 200))
+    return [
+        HealthMetricsOut(
+            bot_id=m.bot_id,
+            environment=m.environment.value,
+            recorded_at=m.recorded_at,
+            inference_latency_p95_ms=m.inference_latency_p95_ms,
+            tokens_per_sec=m.tokens_per_sec,
+            llm_error_rate=m.llm_error_rate,
+            session_cost_usd=m.session_cost_usd,
+            queue_depth=m.queue_depth,
+        )
+        for m in metrics
+    ]

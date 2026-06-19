@@ -118,6 +118,77 @@ class HeartbeatClient:
 
 
 # ──────────────────────────────────────────────────────────────────
+# WebSocket client — real-time transport with auto-reconnect
+# Requires: pip install websockets
+# ──────────────────────────────────────────────────────────────────
+class WSHeartbeatClient:
+    """
+    Persistent WebSocket connection to the Watchdog. Sends signed heartbeats and
+    optional AI health metrics. Reconnects automatically with exponential backoff
+    + jitter (avoids a thundering herd when the server restarts).
+
+    `metrics_provider` is an optional callable returning a dict of health metrics
+    (inference_latency_p95_ms, tokens_per_sec, llm_error_rate, session_cost_usd,
+    queue_depth) sent on each tick.
+    """
+
+    def __init__(
+        self,
+        bot_id: str,
+        environment: str,
+        watchdog_url: str = "ws://localhost:8000",
+        secret: str | None = None,
+        interval: int = 30,
+        metrics_provider=None,
+    ):
+        self.bot_id = bot_id
+        self.environment = environment
+        self.base = watchdog_url.rstrip("/")
+        self.secret = secret
+        self.interval = interval
+        self.metrics_provider = metrics_provider
+
+    def _url(self) -> str:
+        ts = str(int(time.time()))
+        q = f"bot_id={self.bot_id}&environment={self.environment}"
+        if self.secret:
+            msg = f"{self.bot_id}|{self.environment}|{ts}".encode()
+            sig = hmac.new(self.secret.encode(), msg, hashlib.sha256).hexdigest()
+            q += f"&ts={ts}&sig={sig}"
+        return f"{self.base}/ws/agent?{q}"
+
+    async def run(self) -> None:
+        import json
+        import random
+        import websockets  # lazy import
+
+        backoff = 1
+        seq = 0
+        while True:
+            try:
+                async with websockets.connect(self._url()) as ws:
+                    logger.info("WS connected → %s", self.bot_id)
+                    backoff = 1  # reset after a successful connect
+                    while True:
+                        seq += 1
+                        if self.metrics_provider:
+                            await ws.send(json.dumps(
+                                {"type": "health", "seq": seq, "metrics": self.metrics_provider()}
+                            ))
+                        else:
+                            await ws.send(json.dumps({"type": "heartbeat", "seq": seq}))
+                        await ws.recv()  # ack
+                        await asyncio.sleep(self.interval)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                wait = min(backoff, 30) + random.uniform(0, 1)  # jitter
+                logger.warning("WS disconnected (%s); reconnecting in %.1fs", exc, wait)
+                await asyncio.sleep(wait)
+                backoff = min(backoff * 2, 30)
+
+
+# ──────────────────────────────────────────────────────────────────
 # Minimal demo — run with: python bot_client_example.py
 # ──────────────────────────────────────────────────────────────────
 async def _demo():

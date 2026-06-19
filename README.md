@@ -75,13 +75,47 @@ Heartbeats are signed with HMAC-SHA256 to stop spoofing. The client sends
 
 ## API
 
-| Method | Path         | Description                         |
-|--------|--------------|-------------------------------------|
-| POST   | /heartbeat   | Bot reports it is alive             |
-| GET    | /status      | Full fleet status as JSON           |
-| GET    | /dashboard   | Web UI with visual indicators       |
-| GET    | /health      | Service liveness check              |
-| GET    | /docs        | Interactive API docs (Swagger UI)   |
+| Method | Path                       | Description                              |
+|--------|----------------------------|------------------------------------------|
+| WS     | /ws/agent                  | Real-time agent connection (heartbeat + health) |
+| POST   | /heartbeat                 | HTTP fallback — bot reports it is alive  |
+| GET    | /status                    | Full fleet status as JSON                |
+| GET    | /agents/{bot_id}/health    | Recent AI health metrics for an agent    |
+| GET    | /dashboard                 | Web UI with visual indicators            |
+| GET    | /health                    | Service liveness check                   |
+| GET    | /docs                      | Interactive API docs (Swagger UI)        |
+
+## Real-time monitoring over WebSocket
+
+Agents connect to `/ws/agent` for low-latency monitoring; agents that can't speak
+WS keep using `POST /heartbeat` (both drive the same liveness logic, so there is
+one source of truth). The client auto-reconnects with exponential backoff + jitter.
+
+Handshake auth uses the same HMAC as HTTP, via query params (browsers can't set
+WS headers): `/ws/agent?bot_id=..&environment=..&ts=..&sig=..`
+
+```jsonc
+// agent → server
+{ "type": "heartbeat", "seq": 1 }
+{ "type": "health", "seq": 2, "metrics": { "tokens_per_sec": 47.3, "llm_error_rate": 0.01 } }
+// server → agent
+{ "type": "ack", "seq": 2 }
+```
+
+### AI-agent health metrics
+
+What separates an *AI agent* from a generic bot: it can be **online yet degraded
+or burning money**. Reported via the `health` message and stored per report:
+
+| Metric | Meaning |
+|--------|---------|
+| `inference_latency_p95_ms` | LLM responsiveness |
+| `tokens_per_sec`           | Useful throughput |
+| `llm_error_rate`           | 0..1 — alive but failing |
+| `session_cost_usd`         | Runaway-cost guard |
+| `queue_depth`              | Backpressure / saturation |
+
+Anomalies (e.g. error rate > 5%, cost spikes) are flagged in the logs.
 
 ## Project Structure
 
@@ -89,21 +123,30 @@ Heartbeats are signed with HMAC-SHA256 to stop spoofing. The client sends
 watchdog/
 ├── domain/
 │   ├── entities/bot.py          # Bot, Incident — pure Python, no deps
-│   └── interfaces/repositories.py  # Abstract ports
+│   ├── entities/health.py       # HealthMetrics — AI-agent metrics
+│   └── interfaces/repositories.py  # Abstract ports (bot, incident, health)
 ├── use_cases/
-│   └── watchdog.py              # ProcessHeartbeat, RunWatchdog
+│   ├── watchdog.py              # ProcessHeartbeat, RunWatchdog
+│   └── health.py               # RecordHealth + anomaly detection
 ├── adapters/
 │   ├── repositories/
-│   │   └── sqlite_repositories.py   # SQLite implementation (swap for Postgres)
+│   │   ├── sqlite_repositories.py    # SQLite backend
+│   │   └── postgres_repositories.py  # PostgreSQL backend (asyncpg)
 │   └── controllers/
-│       ├── api.py               # POST /heartbeat, GET /status
+│       ├── api.py               # POST /heartbeat, GET /status, GET /agents/{id}/health
+│       ├── auth.py              # HMAC verification (HTTP + WS)
+│       ├── ws.py                # WS /ws/agent — real-time transport
 │       └── dashboard.py         # GET /dashboard
 ├── notifications/
-│   └── manager.py               # NotificationManager + channels
+│   ├── manager.py               # NotificationManager + channels (Log/Email/Webhook)
+│   └── throttler.py             # Smart alert thresholds (debounce + cooldown)
 ├── infrastructure/
 │   ├── config.py                # Settings from env vars
+│   ├── secrets.py               # Per-agent / shared HMAC secrets
+│   ├── time.py                  # tz-aware UTC helpers
+│   ├── ws_manager.py            # Live WS connections, rooms per agent
 │   └── container.py             # Dependency injection wiring
-├── bot_client_example.py        # Drop-in heartbeat client for any bot
+├── bot_client_example.py        # HTTP + WebSocket heartbeat clients
 ├── main.py                      # FastAPI app + watchdog background task
 └── requirements.txt
 ```

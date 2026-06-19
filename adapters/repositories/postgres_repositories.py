@@ -18,7 +18,8 @@ import uuid
 import asyncpg
 
 from domain.entities.bot import Bot, BotEnvironment, BotStatus, Incident
-from domain.interfaces.repositories import IBotRepository, IIncidentRepository
+from domain.entities.health import HealthMetrics
+from domain.interfaces.repositories import IBotRepository, IIncidentRepository, IHealthRepository
 from infrastructure.config import settings
 from infrastructure.time import ensure_utc
 
@@ -60,6 +61,19 @@ CREATE TABLE IF NOT EXISTS incidents (
 CREATE INDEX IF NOT EXISTS idx_incidents_bot ON incidents (bot_id, environment);
 CREATE INDEX IF NOT EXISTS idx_incidents_active ON incidents (bot_id, environment)
     WHERE recovered_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS health_metrics (
+    bot_id                   TEXT        NOT NULL,
+    environment              TEXT        NOT NULL,
+    recorded_at              TIMESTAMPTZ NOT NULL,
+    inference_latency_p95_ms DOUBLE PRECISION,
+    tokens_per_sec           DOUBLE PRECISION,
+    llm_error_rate           DOUBLE PRECISION,
+    session_cost_usd         DOUBLE PRECISION,
+    queue_depth              INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_health_bot ON health_metrics (bot_id, environment, recorded_at DESC);
 """
 
 
@@ -191,3 +205,41 @@ class PostgresIncidentRepository(IIncidentRepository):
             limit,
         )
         return [self._row_to_incident(r) for r in rows]
+
+
+# ──────────────────────────────────────────────────────────────────
+# Health Metrics Repository
+# ──────────────────────────────────────────────────────────────────
+class PostgresHealthRepository(IHealthRepository):
+
+    def _row_to_metrics(self, row) -> HealthMetrics:
+        return HealthMetrics(
+            bot_id=row["bot_id"],
+            environment=BotEnvironment(row["environment"]),
+            recorded_at=ensure_utc(row["recorded_at"]),
+            inference_latency_p95_ms=row["inference_latency_p95_ms"],
+            tokens_per_sec=row["tokens_per_sec"],
+            llm_error_rate=row["llm_error_rate"],
+            session_cost_usd=row["session_cost_usd"],
+            queue_depth=row["queue_depth"],
+        )
+
+    async def save(self, metrics: HealthMetrics) -> None:
+        pool = await get_pool()
+        await pool.execute(
+            "INSERT INTO health_metrics (bot_id, environment, recorded_at, "
+            "inference_latency_p95_ms, tokens_per_sec, llm_error_rate, "
+            "session_cost_usd, queue_depth) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            metrics.bot_id, metrics.environment.value, metrics.recorded_at,
+            metrics.inference_latency_p95_ms, metrics.tokens_per_sec,
+            metrics.llm_error_rate, metrics.session_cost_usd, metrics.queue_depth,
+        )
+
+    async def find_recent(self, bot_id: str, environment: str, limit: int = 50) -> List[HealthMetrics]:
+        pool = await get_pool()
+        rows = await pool.fetch(
+            "SELECT * FROM health_metrics WHERE bot_id = $1 AND environment = $2 "
+            "ORDER BY recorded_at DESC LIMIT $3",
+            bot_id, environment, limit,
+        )
+        return [self._row_to_metrics(r) for r in rows]

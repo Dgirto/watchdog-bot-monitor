@@ -45,7 +45,6 @@ def _fmt_dur(seconds: float) -> str:
 def _is_anomaly(m) -> bool:
     return (
         (m.llm_error_rate or 0) > 0.05
-        or (m.session_cost_usd or 0) > 10
         or (m.inference_latency_p95_ms or 0) > 3000
         or (m.queue_depth or 0) > 200
     )
@@ -131,12 +130,6 @@ def _gauges(m) -> str:
         lvl = "ok" if v < 1500 else "warn" if v <= 3000 else "crit"
         out.append(_gauge("p95 latencia", lvl, min(v / 4000 * 100, 100), f"{int(v)}<small>ms</small>"))
 
-    v = m.tokens_per_sec
-    if v is None:
-        out.append(_gauge("tokens/seg", "dead", 0, "—"))
-    else:
-        out.append(_gauge("tokens/seg", "ok", min(v / 150 * 100, 100), f"{v:g}"))
-
     v = m.llm_error_rate
     if v is None:
         out.append(_gauge("error LLM", "dead", 0, "—"))
@@ -150,13 +143,6 @@ def _gauges(m) -> str:
     else:
         lvl = "ok" if v < 50 else "warn" if v <= 200 else "crit"
         out.append(_gauge("cola", lvl, min(v / 300 * 100, 100), str(int(v))))
-
-    v = m.session_cost_usd
-    if v is None:
-        out.append(_gauge("costo sesión", "dead", 0, "<small>$</small>0.00"))
-    else:
-        lvl = "ok" if v < 10 else "warn" if v <= 50 else "crit"
-        out.append(_gauge("costo sesión", lvl, min(v / 50 * 100, 100), f"<small>$</small>{v:.2f}"))
     return "".join(out)
 
 

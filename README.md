@@ -99,7 +99,7 @@ navegadores no pueden fijar cabeceras WS): `/ws/agent?bot_id=..&environment=..&t
 ```jsonc
 // agente → servidor
 { "type": "heartbeat", "seq": 1 }
-{ "type": "health", "seq": 2, "metrics": { "tokens_per_sec": 47.3, "llm_error_rate": 0.01 } }
+{ "type": "health", "seq": 2, "metrics": { "inference_latency_p95_ms": 820, "llm_error_rate": 0.01 } }
 // servidor → agente
 { "type": "ack", "seq": 2 }
 ```
@@ -107,15 +107,12 @@ navegadores no pueden fijar cabeceras WS): `/ws/agent?bot_id=..&environment=..&t
 ### Métricas de salud de agente IA
 
 Lo que diferencia a un *agente de IA* de un bot genérico: puede estar **online pero
-degradado o quemando dinero**. Se reportan vía el mensaje `health` y se almacenan
-por cada reporte:
+degradado**. Se reportan vía el mensaje `health` y se almacenan por cada reporte:
 
 | Métrica | Significado |
 |---------|-------------|
 | `inference_latency_p95_ms` | Capacidad de respuesta del LLM |
-| `tokens_per_sec`           | Throughput útil de trabajo |
 | `llm_error_rate`           | 0..1 — vivo pero fallando |
-| `session_cost_usd`         | Control de costo descontrolado |
 | `queue_depth`              | Saturación / backpressure |
 
 Las anomalías (p. ej. tasa de error > 5%, picos de costo) se marcan en los logs.

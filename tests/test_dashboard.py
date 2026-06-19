@@ -27,14 +27,12 @@ def test_dashboard_shows_ai_cockpit_states(client):
     # Healthy AI agent
     with client.websocket_connect("/ws/agent?bot_id=good-agent&environment=prod") as ws:
         ws.send_json({"type": "health", "seq": 1, "metrics": {
-            "inference_latency_p95_ms": 600, "tokens_per_sec": 90,
-            "llm_error_rate": 0.01, "session_cost_usd": 2.0, "queue_depth": 4}})
+            "inference_latency_p95_ms": 600, "llm_error_rate": 0.01, "queue_depth": 4}})
         ws.receive_json()
-    # Degraded AI agent (high error + cost)
+    # Degraded AI agent (high error rate + latency + queue)
     with client.websocket_connect("/ws/agent?bot_id=bad-agent&environment=prod") as ws:
         ws.send_json({"type": "health", "seq": 1, "metrics": {
-            "inference_latency_p95_ms": 3500, "tokens_per_sec": 10,
-            "llm_error_rate": 0.2, "session_cost_usd": 40.0, "queue_depth": 250}})
+            "inference_latency_p95_ms": 3500, "llm_error_rate": 0.2, "queue_depth": 250}})
         ws.receive_json()
 
     html = client.get("/dashboard").text

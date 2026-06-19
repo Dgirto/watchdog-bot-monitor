@@ -9,6 +9,7 @@ import uuid
 
 from domain.entities.bot import Bot, BotEnvironment, BotStatus, Incident
 from domain.interfaces.repositories import IBotRepository, IIncidentRepository
+from infrastructure.time import ensure_utc
 
 
 DB_PATH = "watchdog.db"
@@ -63,8 +64,8 @@ class SqliteBotRepository(IBotRepository):
             name=row[1],
             environment=BotEnvironment(row[2]),
             status=BotStatus(row[3]),
-            last_seen=datetime.fromisoformat(row[4]) if row[4] else None,
-            registered_at=datetime.fromisoformat(row[5]),
+            last_seen=ensure_utc(datetime.fromisoformat(row[4])) if row[4] else None,
+            registered_at=ensure_utc(datetime.fromisoformat(row[5])),
         )
 
     async def upsert(self, bot: Bot) -> Bot:
@@ -127,8 +128,8 @@ class SqliteIncidentRepository(IIncidentRepository):
             incident_id=row[0],
             bot_id=row[1],
             environment=BotEnvironment(row[2]),
-            offline_at=datetime.fromisoformat(row[3]),
-            recovered_at=datetime.fromisoformat(row[4]) if row[4] else None,
+            offline_at=ensure_utc(datetime.fromisoformat(row[3])),
+            recovered_at=ensure_utc(datetime.fromisoformat(row[4])) if row[4] else None,
             downtime_seconds=row[5],
         )
 

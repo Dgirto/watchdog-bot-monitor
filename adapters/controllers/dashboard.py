@@ -3,10 +3,11 @@ adapters/controllers/dashboard.py
 GET /dashboard — returns a self-contained HTML page.
 No template engine needed; the HTML is inlined here.
 """
+from html import escape
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 from infrastructure.container import container
-from datetime import datetime, timezone
+from infrastructure.time import utcnow
 
 dashboard_router = APIRouter()
 
@@ -185,9 +186,9 @@ async def dashboard() -> HTMLResponse:
         bot_rows += f"""
         <tr>
           <td><span class="badge badge-{s}"><span class="dot dot-{s}"></span>{s.upper()}</span></td>
-          <td><code>{b.bot_id}</code></td>
-          <td>{b.name}</td>
-          <td><span class="env-tag {env_cls}">{env}</span></td>
+          <td><code>{escape(b.bot_id)}</code></td>
+          <td>{escape(b.name)}</td>
+          <td><span class="env-tag {env_cls}">{escape(env)}</span></td>
           <td>{_fmt_dt(b.last_seen)}</td>
           <td>{_fmt_dt(b.registered_at)}</td>
         </tr>"""
@@ -201,15 +202,15 @@ async def dashboard() -> HTMLResponse:
         recovered = f'<span class="recovered">{_fmt_dt(i.recovered_at)}</span>' if i.recovered_at else '<span class="open-badge">ACTIVE</span>'
         incident_rows += f"""
         <tr>
-          <td><code>{i.bot_id}</code></td>
-          <td><span class="env-tag {env_cls}">{env}</span></td>
+          <td><code>{escape(i.bot_id)}</code></td>
+          <td><span class="env-tag {env_cls}">{escape(env)}</span></td>
           <td>{_fmt_dt(i.offline_at)}</td>
           <td>{recovered}</td>
           <td>{_fmt_downtime(i.downtime_seconds)}</td>
         </tr>"""
 
     html = _HTML_TEMPLATE.format(
-        generated_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        generated_at=utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         total=len(bots),
         bot_rows=bot_rows,
         incident_rows=incident_rows,

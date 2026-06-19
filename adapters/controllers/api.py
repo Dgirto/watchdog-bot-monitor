@@ -2,12 +2,15 @@
 adapters/controllers/api.py
 HTTP layer — thin. Parse → Use Case → Respond.
 """
+import re
 from datetime import datetime
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Header, HTTPException, status
 from pydantic import BaseModel, field_validator
 
+from adapters.controllers.auth import verify_heartbeat_auth
 from infrastructure.container import container
+from infrastructure.time import utcnow
 
 router = APIRouter()
 
@@ -15,6 +18,10 @@ router = APIRouter()
 # ─────────────────── Pydantic I/O schemas ────────────────────────
 
 VALID_ENVS = {"prod", "staging", "dev"}
+
+# Identifiers must be safe to render and store — blocks XSS payloads at the door (S-3).
+_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_NAME_RE = re.compile(r"^[\w .\-]{1,80}$", re.UNICODE)
 
 
 class HeartbeatIn(BaseModel):
@@ -33,8 +40,18 @@ class HeartbeatIn(BaseModel):
     @classmethod
     def validate_bot_id(cls, v: str) -> str:
         v = v.strip()
-        if not v:
-            raise ValueError("bot_id cannot be empty")
+        if not _ID_RE.match(v):
+            raise ValueError("bot_id must be 1-64 chars: letters, digits, . _ -")
+        return v
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip()
+        if not _NAME_RE.match(v):
+            raise ValueError("name must be 1-80 chars: letters, digits, spaces, . _ -")
         return v
 
 
@@ -83,7 +100,14 @@ class FleetStatusOut(BaseModel):
     summary="Receive a heartbeat signal from a bot",
     tags=["Heartbeat"],
 )
-async def heartbeat(payload: HeartbeatIn) -> HeartbeatOut:
+async def heartbeat(
+    payload: HeartbeatIn,
+    x_timestamp: Optional[str] = Header(default=None),
+    x_signature: Optional[str] = Header(default=None),
+) -> HeartbeatOut:
+    # Verify the agent is who it claims to be before recording anything (S-2).
+    verify_heartbeat_auth(payload.bot_id, payload.environment, x_timestamp, x_signature)
+
     from use_cases.watchdog import HeartbeatRequest
     request = HeartbeatRequest(
         bot_id=payload.bot_id,
@@ -115,7 +139,7 @@ async def fleet_status() -> FleetStatusOut:
         counts[b.status.value] = counts.get(b.status.value, 0) + 1
 
     return FleetStatusOut(
-        generated_at=datetime.utcnow(),
+        generated_at=utcnow(),
         total=len(bots),
         **counts,
         bots=[

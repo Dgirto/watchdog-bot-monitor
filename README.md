@@ -43,11 +43,35 @@ pip install -r requirements.txt
 export HEARTBEAT_TIMEOUT=60    # seconds without heartbeat → offline
 export GRACE_PERIOD=15         # extra buffer for network jitter
 export WATCHDOG_INTERVAL=30    # sweep frequency
+
+# ── Heartbeat authentication (HMAC) ──────────────────────────────
+export HEARTBEAT_AUTH_MODE=warn          # off | warn | enforce
+export AGENT_SHARED_SECRET=change-me      # or per-agent: AGENT_SECRETS="bot1:s1,bot2:s2"
+
+# ── Alerts: email primary, Slack secondary ───────────────────────
+export SENDGRID_API_KEY=SG.xxxxx
+export ALERT_EMAIL_SENDER=watchdog@yourco.com
+export ALERT_EMAIL_RECIPIENTS=oncall@yourco.com,sre@yourco.com
 export ALERT_WEBHOOK_URL=https://hooks.slack.com/...   # optional
+
+# ── Smart alert thresholds (anti-glitch / anti-flapping) ─────────
+export ALERT_CONFIRM_SECONDS=90     # must stay offline this long before alerting
+export ALERT_COOLDOWN_SECONDS=300   # silence window after an alert
 
 # 3. Run
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+## Heartbeat Authentication (zero-downtime rollout)
+
+Heartbeats are signed with HMAC-SHA256 to stop spoofing. The client sends
+`X-Timestamp` and `X-Signature` headers (see `bot_client_example.py`, pass
+`secret=...`). Roll it out without breaking existing agents:
+
+1. **`warn`** (default) — server accepts signed *and* unsigned heartbeats, logging
+   a warning for unsigned ones. Update agents to sign at your own pace.
+2. **`enforce`** — once every agent signs, flip `HEARTBEAT_AUTH_MODE=enforce`.
+   Unsigned / bad-signature / stale (replay) heartbeats are rejected with `401`.
 
 ## API
 

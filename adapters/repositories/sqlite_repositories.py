@@ -53,9 +53,7 @@ CREATE TABLE IF NOT EXISTS health_metrics (
     environment              TEXT NOT NULL,
     recorded_at              TEXT NOT NULL,           -- ISO-8601 UTC
     inference_latency_p95_ms REAL,
-    tokens_per_sec           REAL,
     llm_error_rate           REAL,
-    session_cost_usd         REAL,
     queue_depth              INTEGER
 );
 
@@ -221,22 +219,19 @@ class SqliteHealthRepository(IHealthRepository):
             environment=BotEnvironment(row[1]),
             recorded_at=ensure_utc(datetime.fromisoformat(row[2])),
             inference_latency_p95_ms=row[3],
-            tokens_per_sec=row[4],
-            llm_error_rate=row[5],
-            session_cost_usd=row[6],
-            queue_depth=row[7],
+            llm_error_rate=row[4],
+            queue_depth=row[5],
         )
 
     async def save(self, metrics: HealthMetrics) -> None:
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
                 "INSERT INTO health_metrics (bot_id, environment, recorded_at, "
-                "inference_latency_p95_ms, tokens_per_sec, llm_error_rate, "
-                "session_cost_usd, queue_depth) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "inference_latency_p95_ms, llm_error_rate, queue_depth) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     metrics.bot_id, metrics.environment.value, metrics.recorded_at.isoformat(),
-                    metrics.inference_latency_p95_ms, metrics.tokens_per_sec,
-                    metrics.llm_error_rate, metrics.session_cost_usd, metrics.queue_depth,
+                    metrics.inference_latency_p95_ms, metrics.llm_error_rate, metrics.queue_depth,
                 ),
             )
             await db.commit()
@@ -245,10 +240,22 @@ class SqliteHealthRepository(IHealthRepository):
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute(
                 "SELECT bot_id, environment, recorded_at, inference_latency_p95_ms, "
-                "tokens_per_sec, llm_error_rate, session_cost_usd, queue_depth "
+                "llm_error_rate, queue_depth "
                 "FROM health_metrics WHERE bot_id = ? AND environment = ? "
                 "ORDER BY recorded_at DESC LIMIT ?",
                 (bot_id, environment, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [self._row_to_metrics(r) for r in rows]
+
+    async def find_latest_all(self) -> List[HealthMetrics]:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT bot_id, environment, recorded_at, inference_latency_p95_ms, "
+                "llm_error_rate, queue_depth "
+                "FROM health_metrics h WHERE recorded_at = ("
+                "  SELECT MAX(recorded_at) FROM health_metrics h2 "
+                "  WHERE h2.bot_id = h.bot_id AND h2.environment = h.environment)"
             ) as cursor:
                 rows = await cursor.fetchall()
                 return [self._row_to_metrics(r) for r in rows]

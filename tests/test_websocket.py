@@ -22,7 +22,7 @@ def test_ws_heartbeat_acks_and_marks_online(client):
 def test_ws_health_metrics_stored_and_sanitized(client):
     with client.websocket_connect("/ws/agent?bot_id=agent-01&environment=prod") as ws:
         ws.send_json({"type": "health", "seq": 2, "metrics": {
-            "tokens_per_sec": 47.3,
+            "inference_latency_p95_ms": 820.0,
             "llm_error_rate": 0.12,
             "queue_depth": 5,
             "evil": "<script>",      # must be dropped
@@ -31,9 +31,10 @@ def test_ws_health_metrics_stored_and_sanitized(client):
 
     rows = client.get("/agents/agent-01/health?environment=prod").json()
     assert len(rows) == 1
-    assert rows[0]["tokens_per_sec"] == 47.3
+    assert rows[0]["inference_latency_p95_ms"] == 820.0
     assert rows[0]["queue_depth"] == 5
     assert "evil" not in rows[0]
+    assert "tokens_per_sec" not in rows[0]
 
 
 def test_ws_unknown_message_returns_error(client):

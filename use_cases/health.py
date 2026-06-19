@@ -13,9 +13,7 @@ logger = logging.getLogger("watchdog.health")
 # Fields we accept from an agent's `health` message; anything else is ignored.
 _ALLOWED = {
     "inference_latency_p95_ms",
-    "tokens_per_sec",
     "llm_error_rate",
-    "session_cost_usd",
     "queue_depth",
 }
 
@@ -39,8 +37,8 @@ class RecordHealthUseCase:
         flags: List[str] = []
         if metrics.llm_error_rate is not None and metrics.llm_error_rate > 0.05:
             flags.append(f"high LLM error rate ({metrics.llm_error_rate:.0%})")
-        if metrics.session_cost_usd is not None and metrics.session_cost_usd > 50:
-            flags.append(f"session cost high (${metrics.session_cost_usd:.2f})")
+        if metrics.queue_depth is not None and metrics.queue_depth > 200:
+            flags.append(f"queue backing up ({metrics.queue_depth})")
         return flags
 
     async def execute(self, bot_id: str, environment: str, raw_metrics: dict) -> HealthMetrics:

@@ -121,8 +121,24 @@ class MyCustomChannel(NotificationChannel):
 channels.append(MyCustomChannel(...))
 ```
 
-## Swapping the Database
+## Database Backend (SQLite or PostgreSQL)
 
-Implement `IBotRepository` and `IIncidentRepository` for PostgreSQL/MySQL,
-then replace `SqliteBotRepository` and `SqliteIncidentRepository` in
-`infrastructure/container.py`. The rest of the codebase is untouched.
+Selected at startup with `DB_BACKEND`; both implement the same ports, so no
+business logic changes.
+
+```bash
+# Default — zero config
+export DB_BACKEND=sqlite
+export DB_PATH=watchdog.db
+
+# Production — concurrent writes, connection pool, HA-ready
+export DB_BACKEND=postgres
+export DATABASE_URL=postgresql://user:pass@localhost:5432/watchdog
+pip install asyncpg   # only needed for the postgres backend
+```
+
+`PostgresBotRepository`/`PostgresIncidentRepository` use an `asyncpg` pool and
+`TIMESTAMPTZ` columns. The schema is created automatically on startup.
+
+To add another backend (MySQL, etc.), implement `IBotRepository` and
+`IIncidentRepository` and wire it in `infrastructure/container.py`.

@@ -2,6 +2,7 @@
 notifications/manager.py
 NotificationManager — plug in any channel without touching business logic.
 """
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
@@ -69,22 +70,62 @@ class WebhookChannel(NotificationChannel):
                 logger.error("WebhookChannel failed: %s", exc)
 
 
-class EmailChannel(NotificationChannel):
+class SendGridEmailChannel(NotificationChannel):
     """
-    Stub — wire up smtplib / SendGrid / SES here.
-    The interface is the contract; the implementation is your choice.
+    Email alerts via the SendGrid v3 HTTP API (uses httpx — no new dependency).
+    Retries with backoff so a transient provider hiccup doesn't lose an alert (S-8).
+
+    For AWS SES, swap the URL/auth/payload — the NotificationChannel contract
+    is unchanged.
     """
 
-    def __init__(self, recipients: List[str]):
+    _ENDPOINT = "https://api.sendgrid.com/v3/mail/send"
+    _MAX_RETRIES = 3
+
+    def __init__(self, api_key: str, sender: str, recipients: List[str]):
+        self.api_key = api_key
+        self.sender = sender
         self.recipients = recipients
 
-    async def send(self, event: StatusChangeEvent) -> None:
-        # TODO: implement with your preferred email provider
-        logger.debug(
-            "EmailChannel (stub) → would email %s about %s",
-            self.recipients,
-            event.bot.bot_id,
+    def _build_payload(self, event: StatusChangeEvent) -> dict:
+        status = event.new_status.value.upper()
+        subject = f"[Watchdog] {event.bot.bot_id} → {status} ({event.bot.environment.value})"
+        body = (
+            f"Agent:       {event.bot.bot_id}\n"
+            f"Environment: {event.bot.environment.value}\n"
+            f"Change:      {event.previous_status.value} → {event.new_status.value}\n"
+            f"Occurred at: {event.occurred_at.isoformat()} (UTC)\n"
         )
+        return {
+            "personalizations": [{"to": [{"email": r} for r in self.recipients]}],
+            "from": {"email": self.sender},
+            "subject": subject,
+            "content": [{"type": "text/plain", "value": body}],
+        }
+
+    async def send(self, event: StatusChangeEvent) -> None:
+        import httpx  # lazy import — only needed if this channel is active
+
+        payload = self._build_payload(event)
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+
+        for attempt in range(1, self._MAX_RETRIES + 1):
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.post(self._ENDPOINT, json=payload, headers=headers)
+                    resp.raise_for_status()
+                    logger.info("Email alert sent for %s (%s)", event.bot.bot_id, event.new_status.value)
+                    return
+            except Exception as exc:  # noqa: BLE001
+                wait = 2 ** (attempt - 1)
+                logger.warning("Email attempt %d/%d failed: %s", attempt, self._MAX_RETRIES, exc)
+                if attempt < self._MAX_RETRIES:
+                    await asyncio.sleep(wait)
+        logger.error("Email alert PERMANENTLY failed for %s — manual follow-up needed", event.bot.bot_id)
+
+
+# Backwards-compat alias: older imports of EmailChannel still resolve.
+EmailChannel = SendGridEmailChannel
 
 
 class NotificationManager:

@@ -3,9 +3,14 @@ domain/entities/bot.py
 Core business entities — zero framework dependencies.
 """
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
+
+
+def _utcnow() -> datetime:
+    """Timezone-aware UTC now (domain stays stdlib-only, no infra import)."""
+    return datetime.now(timezone.utc)
 
 
 class BotStatus(str, Enum):
@@ -28,7 +33,7 @@ class Bot:
     environment: BotEnvironment
     status: BotStatus = BotStatus.UNKNOWN
     last_seen: Optional[datetime] = None
-    registered_at: datetime = field(default_factory=datetime.utcnow)
+    registered_at: datetime = field(default_factory=_utcnow)
 
     def record_heartbeat(self, timestamp: datetime) -> None:
         self.last_seen = timestamp

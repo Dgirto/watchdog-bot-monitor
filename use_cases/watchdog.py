@@ -9,6 +9,7 @@ import uuid
 
 from domain.entities.bot import Bot, BotEnvironment, BotStatus, Incident
 from domain.interfaces.repositories import IBotRepository, IIncidentRepository
+from infrastructure.time import utcnow
 from notifications.manager import NotificationManager, StatusChangeEvent
 
 
@@ -49,7 +50,7 @@ class ProcessHeartbeatUseCase:
         self._notifications = notification_manager
 
     async def execute(self, request: HeartbeatRequest) -> HeartbeatResponse:
-        now = datetime.utcnow()
+        now = utcnow()
         env = BotEnvironment(request.environment)
 
         existing = await self._bots.find_by_id(request.bot_id, request.environment)
@@ -114,7 +115,7 @@ class RunWatchdogUseCase:
 
     async def execute(self) -> int:
         """Returns the number of bots newly marked as offline."""
-        now = datetime.utcnow()
+        now = utcnow()
         bots = await self._bots.find_all()
         newly_offline = 0
 

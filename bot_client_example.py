@@ -20,9 +20,10 @@ Usage:
         await your_bot_logic()
 """
 import asyncio
+import hashlib
+import hmac
 import logging
-from contextlib import asynccontextmanager
-from typing import AsyncIterator
+import time
 
 import httpx
 
@@ -43,6 +44,7 @@ class HeartbeatClient:
         name: str | None = None,
         interval: int = 30,
         timeout: int = 5,
+        secret: str | None = None,
     ):
         self.bot_id = bot_id
         self.environment = environment
@@ -50,7 +52,17 @@ class HeartbeatClient:
         self.name = name or bot_id
         self.interval = interval
         self.timeout = timeout
+        self.secret = secret  # if set, heartbeats are HMAC-signed
         self._task: asyncio.Task | None = None
+
+    def _auth_headers(self) -> dict:
+        """Build HMAC signature headers. Empty dict if no secret (unsigned)."""
+        if not self.secret:
+            return {}
+        ts = str(int(time.time()))
+        msg = f"{self.bot_id}|{self.environment}|{ts}".encode()
+        sig = hmac.new(self.secret.encode(), msg, hashlib.sha256).hexdigest()
+        return {"X-Timestamp": ts, "X-Signature": sig}
 
     async def _send_heartbeat(self, client: httpx.AsyncClient) -> None:
         payload = {
@@ -62,6 +74,7 @@ class HeartbeatClient:
             response = await client.post(
                 f"{self.watchdog_url}/heartbeat",
                 json=payload,
+                headers=self._auth_headers(),
                 timeout=self.timeout,
             )
             response.raise_for_status()

@@ -252,3 +252,15 @@ class SqliteHealthRepository(IHealthRepository):
             ) as cursor:
                 rows = await cursor.fetchall()
                 return [self._row_to_metrics(r) for r in rows]
+
+    async def find_latest_all(self) -> List[HealthMetrics]:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT bot_id, environment, recorded_at, inference_latency_p95_ms, "
+                "tokens_per_sec, llm_error_rate, session_cost_usd, queue_depth "
+                "FROM health_metrics h WHERE recorded_at = ("
+                "  SELECT MAX(recorded_at) FROM health_metrics h2 "
+                "  WHERE h2.bot_id = h.bot_id AND h2.environment = h.environment)"
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [self._row_to_metrics(r) for r in rows]

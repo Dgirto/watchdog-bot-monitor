@@ -243,3 +243,11 @@ class PostgresHealthRepository(IHealthRepository):
             bot_id, environment, limit,
         )
         return [self._row_to_metrics(r) for r in rows]
+
+    async def find_latest_all(self) -> List[HealthMetrics]:
+        pool = await get_pool()
+        rows = await pool.fetch(
+            "SELECT DISTINCT ON (bot_id, environment) * FROM health_metrics "
+            "ORDER BY bot_id, environment, recorded_at DESC"
+        )
+        return [self._row_to_metrics(r) for r in rows]

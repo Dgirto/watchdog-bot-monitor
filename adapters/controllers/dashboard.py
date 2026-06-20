@@ -85,20 +85,6 @@ def _verdict(bots, incidents, counts) -> str:
     )
 
 
-def _spark(status) -> str:
-    if status == "online":
-        spec = [(7, ""), (12, ""), (9, "live"), (15, "live"), (8, "live"), (13, "live"), (10, "live"), (14, "live"), (11, "live")]
-    elif status == "offline":
-        spec = [(8, ""), (13, ""), (7, ""), (15, ""), (9, ""), (11, ""), (3, "dead"), (3, "dead"), (3, "dead")]
-    else:
-        spec = [(6, ""), (9, ""), (5, ""), (7, "live"), (4, ""), (8, ""), (3, ""), (6, ""), (4, "")]
-    bars = "".join(
-        (f'<i class="{c}" style="height:{h}px"></i>' if c else f'<i style="height:{h}px"></i>')
-        for h, c in spec
-    )
-    return f'<span class="heartbeat" aria-hidden="true">{bars}</span>'
-
-
 def _tile(bot, is_ai) -> str:
     s, env = bot.status.value, bot.environment.value
     ico = {"online": ICON_CHECK, "offline": ICON_XCIRCLE, "unknown": ICON_QMARK}[s]
@@ -109,7 +95,7 @@ def _tile(bot, is_ai) -> str:
         f'{chip}</div>'
         f'<div class="tile-id">{escape(bot.bot_id)}</div>'
         f'<div class="tile-name">{escape(bot.name)}</div>'
-        f'<div class="tile-foot"><span class="env env-{env}">{escape(env)}</span>{_spark(s)}</div></article>'
+        f'<div class="tile-foot"><span class="env env-{env}">{escape(env)}</span></div></article>'
     )
 
 
@@ -463,11 +449,6 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .env-prod    { background: var(--info-s); color: var(--info); border-color: var(--info-l); }
   .env-staging { background: var(--warn-s); color: var(--warn); border-color: var(--warn-l); }
   .env-dev     { background: var(--neut-s); color: var(--txt-2); border-color: var(--line-2); }
-  .heartbeat { display: flex; align-items: flex-end; gap: 2px; height: 18px; }
-  .heartbeat i { width: 3px; border-radius: 1px; background: var(--txt-4); }
-  .tile.s-online  .heartbeat i.live { background: var(--ok); }
-  .tile.s-offline .heartbeat i.dead { background: var(--crit); }
-  .tile.s-unknown .heartbeat i.live { background: var(--warn); }
 
   .panel { background: var(--panel); border: 1px solid var(--line-2); border-radius: 12px; overflow: hidden; }
   .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }

@@ -2,6 +2,7 @@
 use_cases/health.py — record AI-agent health metrics reported over WebSocket.
 """
 import logging
+import math
 from typing import List
 
 from domain.entities.bot import BotEnvironment
@@ -23,12 +24,19 @@ class RecordHealthUseCase:
         self._health = health_repo
 
     @staticmethod
-    def _sanitize(raw: dict) -> dict:
-        """Keep only known numeric fields; drop junk an attacker might inject."""
+    def _sanitize(raw) -> dict:
+        """Keep only known, finite numeric fields. Hostile inputs (a non-dict
+        payload, booleans, NaN/Infinity, junk keys) are silently dropped — they
+        must never crash the handler nor poison the JSON API response."""
+        if not isinstance(raw, dict):
+            return {}
         clean: dict = {}
         for key in _ALLOWED:
-            if key in raw and isinstance(raw[key], (int, float)) and not isinstance(raw[key], bool):
-                clean[key] = raw[key]
+            value = raw.get(key)
+            if isinstance(value, bool):  # bool is a subclass of int — exclude
+                continue
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                clean[key] = value
         return clean
 
     @staticmethod

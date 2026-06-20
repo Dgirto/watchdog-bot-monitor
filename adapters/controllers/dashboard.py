@@ -100,6 +100,7 @@ def _tile(bot, is_ai) -> str:
 
 
 def _gauge(label, level, fill, val_html) -> str:
+    fill = max(0.0, min(float(fill), 100.0))  # never emit an out-of-range width
     return (
         f'<div class="gauge {level}"><span class="g-lbl">{label}</span>'
         f'<span class="g-track"><span class="g-fill" style="width:{fill:.0f}%"></span></span>'

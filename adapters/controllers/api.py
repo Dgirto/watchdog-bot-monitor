@@ -11,6 +11,7 @@ from pydantic import BaseModel, field_validator
 from adapters.controllers.auth import verify_heartbeat_auth
 from infrastructure.container import container
 from infrastructure.time import utcnow
+from use_cases.watchdog import HeartbeatRequest
 
 router = APIRouter()
 
@@ -117,7 +118,6 @@ async def heartbeat(
     # Verify the agent is who it claims to be before recording anything (S-2).
     verify_heartbeat_auth(payload.bot_id, payload.environment, x_timestamp, x_signature)
 
-    from use_cases.watchdog import HeartbeatRequest
     request = HeartbeatRequest(
         bot_id=payload.bot_id,
         environment=payload.environment,

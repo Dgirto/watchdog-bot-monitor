@@ -16,6 +16,7 @@ Protocol (JSON text frames):
                      {"type":"error","detail":"..."}
                      {"type":"command","action":"drain"|"shutdown"}
 """
+import json
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -24,6 +25,7 @@ from adapters.controllers.api import VALID_ENVS, _ID_RE
 from adapters.controllers.auth import AuthError, verify_signature
 from infrastructure.container import container
 from infrastructure.ws_manager import ws_manager
+from use_cases.watchdog import HeartbeatRequest
 
 logger = logging.getLogger("watchdog.ws")
 ws_router = APIRouter()
@@ -53,13 +55,20 @@ async def agent_ws(ws: WebSocket) -> None:
     key = (bot_id, environment)
     await ws_manager.connect(key, ws)
 
-    from use_cases.watchdog import HeartbeatRequest
-
     try:
         while True:
-            msg = await ws.receive_json()
-            mtype = msg.get("type")
+            raw = await ws.receive_text()
 
+            # A single malformed frame must not drop a healthy connection.
+            try:
+                msg = json.loads(raw)
+                if not isinstance(msg, dict):
+                    raise ValueError("payload must be a JSON object")
+            except (json.JSONDecodeError, ValueError):
+                await ws.send_json({"type": "error", "detail": "invalid JSON payload"})
+                continue
+
+            mtype = msg.get("type")
             if mtype in ("heartbeat", "health"):
                 # Any message proves liveness → update last_seen / close incidents.
                 await container.process_heartbeat.execute(

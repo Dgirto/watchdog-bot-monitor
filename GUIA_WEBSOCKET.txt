@@ -1,0 +1,93 @@
+==========================================================
+  CÓMO CONECTAR UN BOT REAL AL WATCHDOG (por WebSocket)
+==========================================================
+
+La idea es simple: tu bot abre una conexión WebSocket con el Watchdog y le
+manda un "latido" (heartbeat) cada pocos segundos. Mientras el bot lata,
+aparece ONLINE en el dashboard. Si deja de latir (se cae, se cuelga, se
+apaga), el Watchdog lo detecta y lo marca OFFLINE, abriendo un incidente.
+
+Ya tienes un agente listo para usar: el archivo "watchdog_agent.py".
+
+
+----------------------------------------------------------
+  PASO 1 — Instalar la librería (una sola vez)
+----------------------------------------------------------
+
+    pip install websockets
+
+
+----------------------------------------------------------
+  PASO 2 — Copiar y configurar el agente
+----------------------------------------------------------
+
+Copia "watchdog_agent.py" a la carpeta de tu bot y abre el archivo.
+Arriba verás un bloque CONFIG. Edita SOLO estas 4 líneas:
+
+    WATCHDOG_URL = "ws://localhost:8000"   <- donde corre el watchdog
+    BOT_ID       = "mi-bot-01"             <- un nombre único para tu bot
+    ENVIRONMENT  = "prod"                  <- prod, staging o dev
+    SECRET       = ""                      <- déjalo vacío (ver PASO 5)
+
+Notas:
+  - Si el watchdog está en otra máquina, cambia "localhost" por su IP o
+    dominio, p. ej.  ws://192.168.1.50:8000   o   wss://watchdog.tuempresa.com
+  - "ws://" para conexión normal, "wss://" si está detrás de HTTPS.
+
+
+----------------------------------------------------------
+  PASO 3 — Arrancarlo
+----------------------------------------------------------
+
+    python watchdog_agent.py
+
+Si todo va bien verás:
+
+    [watchdog] conectado como mi-bot-01 (prod)
+
+Déjalo corriendo. Para detenerlo: Ctrl+C.
+(Se reconecta solo si el servidor se reinicia o se cae la red.)
+
+
+----------------------------------------------------------
+  PASO 4 — Comprobar que está ONLINE
+----------------------------------------------------------
+
+Abre en el navegador:
+
+    http://localhost:8000/dashboard
+
+Tu bot aparece en verde (ONLINE). Para probar que la detección funciona:
+detén el agente (Ctrl+C), espera ~80 segundos y refresca: pasará a rojo
+(OFFLINE) y se creará un incidente. Vuelve a arrancarlo y se recupera solo.
+
+
+----------------------------------------------------------
+  PASO 5 — (OPCIONAL) Si el servidor exige autenticación
+----------------------------------------------------------
+
+Por defecto el servidor acepta agentes sin firma (modo "warn").
+Si lo configuraron en modo "enforce", necesitas un secreto. Pídeselo a
+quien administra el watchdog y ponlo en la config:
+
+    SECRET = "el-secreto-que-te-dieron"
+
+El agente firma cada conexión automáticamente. Sin el secreto correcto,
+el servidor rechaza la conexión (error 403).
+
+
+----------------------------------------------------------
+  PASO 6 — (OPCIONAL) Integrarlo dentro de tu bot
+----------------------------------------------------------
+
+El agente corre como un proceso aparte, junto a tu bot. La forma más simple:
+arráncalo en paralelo a tu programa (otra terminal, o como servicio).
+
+Si tu bot ya usa asyncio y quieres meterlo en el mismo proceso, copia la
+función run() de watchdog_agent.py y lánzala como tarea de fondo:
+
+    import asyncio
+    asyncio.create_task(run())      # junto a la lógica de tu bot
+
+Eso es todo. Tu bot ya reporta su disponibilidad en tiempo real.
+==========================================================

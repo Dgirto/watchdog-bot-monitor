@@ -62,7 +62,9 @@ class Incident:
 
     def resolve(self, recovered_at: datetime) -> None:
         self.recovered_at = recovered_at
-        self.downtime_seconds = (recovered_at - self.offline_at).total_seconds()
+        # Clamp at 0: clock skew / out-of-order timestamps must never yield a
+        # negative downtime.
+        self.downtime_seconds = max(0.0, (recovered_at - self.offline_at).total_seconds())
 
     @property
     def is_active(self) -> bool:

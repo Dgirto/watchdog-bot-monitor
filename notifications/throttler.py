@@ -54,6 +54,7 @@ class AlertThrottler(NotificationChannel):
         self._state: dict[tuple, _BotState] = {}
 
     async def send(self, event: StatusChangeEvent) -> None:
+        self._prune()
         key = (event.bot.bot_id, event.bot.environment.value)
         state = self._state.setdefault(key, _BotState())
 
@@ -61,6 +62,20 @@ class AlertThrottler(NotificationChannel):
             await self._on_offline(key, state, event)
         else:
             await self._on_online(state, event)
+
+    def _prune(self) -> None:
+        """Drop fully-idle bots so per-process state can't grow unbounded
+        (e.g. transient bot ids that flapped once). Keeps only bots with a
+        pending confirmation, an unacknowledged alert, or an active cooldown."""
+        now = utcnow()
+        idle = [
+            k for k, s in self._state.items()
+            if (s.pending is None or s.pending.done())
+            and not s.alerted
+            and (s.cooldown_until is None or now >= s.cooldown_until)
+        ]
+        for k in idle:
+            self._state.pop(k, None)
 
     # ── OFFLINE: debounce, then confirm before alerting ──────────────
     async def _on_offline(self, key: tuple, state: _BotState, event: StatusChangeEvent) -> None:

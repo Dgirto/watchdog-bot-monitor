@@ -185,7 +185,10 @@ async def fleet_status() -> FleetStatusOut:
 async def agent_health(bot_id: str, environment: str, limit: int = 50) -> List[HealthMetricsOut]:
     if environment not in VALID_ENVS:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "invalid environment")
-    metrics = await container.health_repo.find_recent(bot_id, environment, limit=min(limit, 200))
+    # Clamp to a safe range — a negative limit is "no limit" in SQLite, which
+    # would let a caller exfiltrate the whole table (resource exhaustion).
+    safe_limit = max(1, min(limit, 200))
+    metrics = await container.health_repo.find_recent(bot_id, environment, limit=safe_limit)
     return [
         HealthMetricsOut(
             bot_id=m.bot_id,

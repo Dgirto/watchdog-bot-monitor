@@ -44,6 +44,10 @@ export HEARTBEAT_TIMEOUT=60    # segundos sin heartbeat → offline
 export GRACE_PERIOD=15         # margen extra para absorber jitter de red
 export WATCHDOG_INTERVAL=30    # frecuencia del barrido (sweep)
 
+# ── Entorno / endurecimiento ─────────────────────────────────────
+export APP_ENV=dev            # dev | prod (en prod, /docs se desactiva)
+export EXPOSE_DOCS=false      # override explícito para /docs y /openapi.json
+
 # ── Autenticación de heartbeats (HMAC) ───────────────────────────
 export HEARTBEAT_AUTH_MODE=warn          # off | warn | enforce
 export AGENT_SHARED_SECRET=cambiame       # o por agente: AGENT_SECRETS="bot1:s1,bot2:s2"

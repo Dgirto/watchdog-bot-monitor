@@ -46,7 +46,15 @@ async def _watchdog_loop() -> None:
 # ──────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
+    # Startup — fail fast on bad configuration, surface risky one.
+    errors = settings.validate()
+    if errors:
+        for err in errors:
+            logger.error("CONFIG ERROR: %s", err)
+        raise RuntimeError("Invalid configuration: " + "; ".join(errors))
+    for warn in settings.warnings():
+        logger.warning("CONFIG: %s", warn)
+
     await container.init_db()
     logger.info("Database initialised (backend=%s)", settings.DB_BACKEND)
     task = asyncio.create_task(_watchdog_loop())
@@ -72,7 +80,22 @@ app = FastAPI(
     ),
     version="1.0.0",
     lifespan=lifespan,
+    # API docs leak the full surface — disabled in prod unless EXPOSE_DOCS=true.
+    docs_url="/docs" if settings.DOCS_ENABLED else None,
+    redoc_url="/redoc" if settings.DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if settings.DOCS_ENABLED else None,
 )
+
+
+@app.middleware("http")
+async def _security_headers(request, call_next):
+    """Baseline hardening for every HTTP response (esp. the dashboard)."""
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    return response
+
 
 app.include_router(router)
 app.include_router(dashboard_router)

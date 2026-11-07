@@ -1,6 +1,7 @@
 """
 adapters/controllers/dashboard.py
 GET /dashboard — self-contained "Mission Control" HTML page.
+GET /dashboard/estado — las mismas regiones en JSON, para actualizar sin recargar.
 
 Design lives in _TEMPLATE (HTML + CSS + minimal vanilla JS). Dynamic regions are
 marked with %%TOKENS%% and filled via str.replace() — this avoids the .format()
@@ -8,9 +9,10 @@ brace-doubling trap, so the CSS stays untouched. All dynamic values that come
 from agents are passed through html.escape() (XSS protection, S-3).
 """
 from html import escape
+from pathlib import Path
 
-from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from domain.entities.bot import BotStatus
 from infrastructure.container import container
@@ -18,14 +20,23 @@ from infrastructure.time import utcnow
 
 dashboard_router = APIRouter()
 
+_FUENTES = Path(__file__).parent / "fuentes"
+_FUENTES_PERMITIDAS = {"geist.woff2", "geist-mono.woff2"}
+
 # ── Inline SVG icons (no external icon library) ───────────────────────────
 ICON_CHECK = '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>'
 ICON_XCIRCLE = '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg>'
 ICON_QMARK = '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 4.5 1.5c0 1.7-2.5 2-2.5 3.5"/><path d="M12 17h.01"/></svg>'
-ICON_ALERT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>'
-ICON_CLOCK = '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>'
-ICON_BOT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><rect x="5" y="6" width="14" height="12" rx="2"/><circle cx="9.5" cy="12" r="1"/><circle cx="14.5" cy="12" r="1"/></svg>'
-ICON_IA_FLAG = '<span class="agent-flag" title="Agente de IA"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="6" width="14" height="12" rx="2"/><path d="M12 3v3"/></svg>IA</span>'
+ICON_ALERT = '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>'
+ICON_BOT = '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><rect x="5" y="6" width="14" height="12" rx="2"/><circle cx="9.5" cy="12" r="1"/><circle cx="14.5" cy="12" r="1"/></svg>'
+
+_ESTADOS = {
+    "offline": ("Caído", ICON_XCIRCLE),
+    "degradado": ("Degradado", ICON_ALERT),
+    "unknown": ("Sin datos", ICON_QMARK),
+    "online": ("En línea", ICON_CHECK),
+}
+_PRIORIDAD = {"offline": 0, "degradado": 1, "unknown": 2, "online": 3}
 
 
 # ── Formatting helpers ────────────────────────────────────────────────────
@@ -42,6 +53,13 @@ def _fmt_dur(seconds: float) -> str:
     return f"{s // 3600}h {(s % 3600) // 60}m"
 
 
+def _hace(dt, now) -> str:
+    if dt is None:
+        return "nunca"
+    segundos = (now - dt).total_seconds()
+    return "ahora" if segundos < 3 else f"hace {_fmt_dur(segundos)}"
+
+
 def _is_anomaly(m) -> bool:
     return (
         (m.llm_error_rate or 0) > 0.05
@@ -50,23 +68,34 @@ def _is_anomaly(m) -> bool:
     )
 
 
+def _estado_visible(bot, m) -> str:
+    """Estado que ve el operador: un agente en línea con métricas malas cuenta como degradado."""
+    if bot.status == BotStatus.ONLINE and m is not None and _is_anomaly(m):
+        return "degradado"
+    return bot.status.value
+
+
 # ── Fragment builders ─────────────────────────────────────────────────────
+def _plural(n: int, singular: str, plural: str | None = None) -> str:
+    return f"{n} {singular if n == 1 else (plural or singular + 's')}"
+
+
 def _verdict(bots, incidents, counts) -> str:
     offline = [b for b in bots if b.status == BotStatus.OFFLINE]
     active = [i for i in incidents if i.recovered_at is None]
     if offline or active:
         cls, ico = "crit", ICON_ALERT
-        if active:
-            n = len(active)
-            state = f"{n} incidente{'s' if n != 1 else ''} activo{'s' if n != 1 else ''}"
-        else:
-            n = len(offline)
-            state = f"{n} bot{'s' if n != 1 else ''} caído{'s' if n != 1 else ''}"
+        state = (_plural(len(active), "incidente activo", "incidentes activos") if active
+                 else _plural(len(offline), "bot caído", "bots caídos"))
         if offline:
             b = offline[0]
-            desc = f"<b>{escape(b.bot_id)}</b> ({escape(b.environment.value)}) sin responder. Requiere atención inmediata."
+            desc = f"<b>{escape(b.bot_id)}</b> ({escape(b.environment.value)}) no responde. Requiere atención inmediata."
         else:
             desc = "Hay incidentes activos que requieren atención."
+    elif counts["degradado"] > 0:
+        cls, ico = "warn", ICON_ALERT
+        state = _plural(counts["degradado"], "agente degradado", "agentes degradados")
+        desc = "Sigue en línea, pero sus métricas están fuera de rango."
     elif counts["unknown"] > 0:
         cls, ico = "warn", ICON_ALERT
         state = f"{counts['unknown']} en estado desconocido"
@@ -74,28 +103,38 @@ def _verdict(bots, incidents, counts) -> str:
     else:
         cls, ico = "ok", ICON_CHECK
         state = "Todo operativo"
-        total = counts["online"] + counts["offline"] + counts["unknown"]
-        desc = f"<b>{counts['online']}</b> de <b>{total}</b> agentes online."
+        desc = f"<b>{counts['online']}</b> de <b>{counts['total']}</b> agentes en línea."
     return (
-        f'<div class="verdict {cls}" id="global-health" role="status" aria-live="polite">'
-        f'<div class="verdict-top"><span class="verdict-ico" aria-hidden="true">{ico}</span>'
-        f'<div><div class="verdict-kicker">Estado de la flota</div>'
-        f'<div class="verdict-state">{state}</div></div></div>'
-        f'<div class="verdict-desc">{desc}</div></div>'
+        f'<div class="veredicto {cls}"><span class="veredicto-ico">{ico}</span><div>'
+        f'<p class="veredicto-estado">{state}</p><p class="veredicto-desc">{desc}</p></div></div>'
     )
 
 
-def _tile(bot, is_ai) -> str:
-    s, env = bot.status.value, bot.environment.value
-    ico = {"online": ICON_CHECK, "offline": ICON_XCIRCLE, "unknown": ICON_QMARK}[s]
-    chip = '<span class="agent-chip">IA</span>' if is_ai else ""
+def _vitales(counts, activos) -> str:
+    def vital(etiqueta, valor, tono=""):
+        return f'<div class="vital {tono}"><dt>{etiqueta}</dt><dd>{valor}</dd></div>'
+
     return (
-        f'<article class="tile s-{s}"><div class="tile-top">'
-        f'<span class="tile-status"><span class="dot dot-{s}" aria-hidden="true"></span>{ico}{s.upper()}</span>'
-        f'{chip}</div>'
-        f'<div class="tile-id">{escape(bot.bot_id)}</div>'
-        f'<div class="tile-name">{escape(bot.name)}</div>'
-        f'<div class="tile-foot"><span class="env env-{env}">{escape(env)}</span></div></article>'
+        vital("En línea", f'{counts["online"]}<small>/{counts["total"]}</small>')
+        + vital("Caídos", counts["offline"], "crit" if counts["offline"] else "")
+        + vital("Degradados", counts["degradado"], "warn" if counts["degradado"] else "")
+        + vital("Incidentes activos", activos, "crit" if activos else "")
+    )
+
+
+def _fila_bot(bot, m, now) -> str:
+    estado = _estado_visible(bot, m)
+    etiqueta, ico = _ESTADOS[estado]
+    env = bot.environment.value
+    ia = '<span class="marca-ia">IA</span>' if m is not None else ""
+    clave = escape(f"{bot.bot_id}/{env}", quote=True)
+    return (
+        f'<li class="bot s-{estado}" data-bot="{clave}" data-estado="{estado}">'
+        f'<span class="estado e-{estado}">{ico}{etiqueta}</span>'
+        f'<span class="bot-datos"><span class="bot-id">{escape(bot.bot_id)}</span>{ia}'
+        f'<span class="bot-nombre">{escape(bot.name)}</span></span>'
+        f'<span class="env">{escape(env)}</span>'
+        f'<span class="visto">{_hace(bot.last_seen, now)}</span></li>'
     )
 
 
@@ -112,160 +151,137 @@ def _gauges(m) -> str:
     out = []
     v = m.inference_latency_p95_ms
     if v is None:
-        out.append(_gauge("p95 latencia", "dead", 100, "— <small>ms</small>"))
+        out.append(_gauge("Latencia p95", "dead", 100, "— <small>ms</small>"))
     else:
         lvl = "ok" if v < 1500 else "warn" if v <= 3000 else "crit"
-        out.append(_gauge("p95 latencia", lvl, min(v / 4000 * 100, 100), f"{int(v)}<small>ms</small>"))
+        out.append(_gauge("Latencia p95", lvl, min(v / 4000 * 100, 100), f"{int(v)}<small> ms</small>"))
 
     v = m.llm_error_rate
     if v is None:
-        out.append(_gauge("error LLM", "dead", 0, "—"))
+        out.append(_gauge("Error LLM", "dead", 0, "—"))
     else:
         lvl = "ok" if v < 0.05 else "warn" if v <= 0.2 else "crit"
-        out.append(_gauge("error LLM", lvl, min(v * 200, 100), f"{v * 100:.1f}<small>%</small>"))
+        out.append(_gauge("Error LLM", lvl, min(v * 200, 100), f"{v * 100:.1f}<small> %</small>"))
 
     v = m.queue_depth
     if v is None:
-        out.append(_gauge("cola", "dead", 0, "—"))
+        out.append(_gauge("Cola", "dead", 0, "—"))
     else:
         lvl = "ok" if v < 50 else "warn" if v <= 200 else "crit"
-        out.append(_gauge("cola", lvl, min(v / 300 * 100, 100), str(int(v))))
+        out.append(_gauge("Cola", lvl, min(v / 300 * 100, 100), str(int(v))))
     return "".join(out)
 
 
 def _instrument(bot, m) -> str:
     if bot.status == BotStatus.OFFLINE:
-        icls, chip = "instr down", '<span class="state-chip down">● DOWN</span>'
-        note = f'<div class="instr-note crit">{ICON_XCIRCLE} Sin heartbeat reciente · revisar el agente</div>'
+        icls, chip = "instr down", f'<span class="estado e-offline">{ICON_XCIRCLE}CAÍDO</span>'
+        note = "Sin heartbeat reciente: revisar el agente."
     elif _is_anomaly(m):
-        icls, chip = "instr anomaly", '<span class="state-chip degraded">▲ DEGRADADO</span>'
-        note = f'<div class="instr-note warn">{ICON_ALERT} Métricas fuera de rango — posible degradación</div>'
+        icls, chip = "instr anomaly", f'<span class="estado e-degradado">{ICON_ALERT}DEGRADADO</span>'
+        note = "Métricas fuera de rango: posible degradación."
     else:
-        icls, chip = "instr", '<span class="state-chip ok">● ÓPTIMO</span>'
-        note = f'<div class="instr-note">{ICON_CHECK} Operando dentro de parámetros normales</div>'
+        icls, chip = "instr", f'<span class="estado e-online">{ICON_CHECK}ÓPTIMO</span>'
+        note = "Opera dentro de los parámetros normales."
     return (
-        f'<article class="{icls}"><div class="instr-head"><div class="instr-id">'
-        f'<span class="mk" aria-hidden="true">{ICON_BOT}</span>'
-        f'<div><div class="n">{escape(bot.name)}</div>'
-        f'<div class="i">{escape(bot.bot_id)} · {escape(bot.environment.value)}</div></div></div>'
-        f'{chip}</div><div class="gauges">{_gauges(m)}</div>{note}</article>'
-    )
-
-
-def _fleet_row(bot, is_ai) -> str:
-    s, env = bot.status.value, bot.environment.value
-    badge = {
-        "online": f'<span class="badge badge-online">{ICON_CHECK}ONLINE</span>',
-        "offline": f'<span class="badge badge-offline">{ICON_XCIRCLE}OFFLINE</span>',
-        "unknown": f'<span class="badge badge-unknown">{ICON_QMARK}UNKNOWN</span>',
-    }[s]
-    flag = ICON_IA_FLAG if is_ai else ""
-    rowcls = ' class="row-crit"' if s == "offline" else ""
-    seen_cls = "ts" if bot.last_seen else "ts dim"
-    return (
-        f"<tr{rowcls}><td>{badge}</td>"
-        f'<td><span class="bot-id">{escape(bot.bot_id)}</span>{flag}</td>'
-        f'<td class="bot-name">{escape(bot.name)}</td>'
-        f'<td><span class="env env-{env}">{escape(env)}</span></td>'
-        f'<td><span class="{seen_cls}">{_fmt_dt(bot.last_seen)}</span></td>'
-        f'<td><span class="ts dim">{_fmt_dt(bot.registered_at)}</span></td></tr>'
+        f'<article class="{icls}"><div class="instr-head"><div>'
+        f'<p class="instr-nombre">{escape(bot.name)}</p>'
+        f'<p class="instr-id">{escape(bot.bot_id)} · {escape(bot.environment.value)}</p></div>'
+        f'{chip}</div><div class="gauges">{_gauges(m)}</div><p class="instr-nota">{note}</p></article>'
     )
 
 
 def _incident_row(i, now) -> str:
     env = i.environment.value
     if i.recovered_at is None:
-        rowcls = ' class="row-crit"'
-        rec = f'<span class="pill pill-active">{ICON_CLOCK}ACTIVO</span>'
-        dt = f'<span class="downtime downtime-open">en curso · {_fmt_dur((now - i.offline_at).total_seconds())}</span>'
+        estado = f'<span class="estado e-offline">{ICON_XCIRCLE}Activo</span>'
+        dur = f"en curso · {_fmt_dur((now - i.offline_at).total_seconds())}"
+        cls = "incidente abierto"
     else:
-        rowcls = ""
-        rec = f'<span class="pill pill-recovered">{ICON_CHECK}{_fmt_dt(i.recovered_at)}</span>'
-        dt = f'<span class="downtime downtime-done">{_fmt_dur(i.downtime_seconds or 0)}</span>'
+        estado = f'<span class="estado e-online">{ICON_CHECK}Recuperado</span>'
+        dur = _fmt_dur(i.downtime_seconds or 0)
+        cls = "incidente"
     return (
-        f"<tr{rowcls}><td><span class=\"bot-id\">{escape(i.bot_id)}</span></td>"
-        f'<td><span class="env env-{env}">{escape(env)}</span></td>'
-        f'<td><span class="ts">{_fmt_dt(i.offline_at)}</span></td>'
-        f"<td>{rec}</td><td>{dt}</td></tr>"
+        f'<li class="{cls}"><div><span class="bot-id">{escape(i.bot_id)}</span>'
+        f'<span class="env">{escape(env)}</span>'
+        f'<p class="incidente-hora">{_fmt_dt(i.offline_at)} UTC</p></div>'
+        f'<div class="incidente-fin">{estado}<span class="incidente-dur">{dur}</span></div></li>'
     )
 
 
 _COCKPIT_EMPTY = (
-    '<div class="empty" style="grid-column:1/-1">'
-    f'<div class="ico" aria-hidden="true">{ICON_BOT}</div>'
-    '<div class="t">Sin agentes de IA reportando</div>'
-    '<div class="s">Los agentes envían métricas vía WebSocket (mensaje "health").</div></div>'
+    f'<div class="vacio"><span class="vacio-ico">{ICON_BOT}</span>'
+    '<p class="t">Sin agentes de IA reportando</p>'
+    '<p>Los agentes envían métricas vía WebSocket (mensaje "health").</p></div>'
 )
 
 _INCIDENTS_EMPTY = (
-    '<tr><td colspan="5" style="padding:0"><div class="empty">'
-    f'<div class="ico" aria-hidden="true">{ICON_CHECK}</div>'
-    '<div class="t">Sin incidentes registrados 🎉</div>'
-    '<div class="s">Toda la flota mantuvo disponibilidad en la ventana observada.</div></div></td></tr>'
+    f'<li class="vacio"><span class="vacio-ico">{ICON_CHECK}</span>'
+    '<p class="t">Sin incidentes registrados</p>'
+    '<p>Toda la flota mantuvo su disponibilidad.</p></li>'
 )
+
+_FLOTA_EMPTY = '<li class="vacio"><p class="t">Sin bots registrados</p><p>Esperando el primer heartbeat.</p></li>'
+
+
+async def _regiones() -> dict:
+    """Calcula cada región del panel: la usan la página y la actualización en vivo."""
+    bots = await container.bot_repo.find_all()
+    incidents = await container.incident_repo.find_all(limit=30)
+    latest = await container.health_repo.find_latest_all()
+    now = utcnow()
+
+    metricas = {(m.bot_id, m.environment.value): m for m in latest}
+    de = lambda b: metricas.get((b.bot_id, b.environment.value))  # noqa: E731
+
+    counts = {"online": 0, "offline": 0, "unknown": 0, "degradado": 0, "total": len(bots)}
+    for b in bots:
+        counts[b.status.value] = counts.get(b.status.value, 0) + 1
+        if _estado_visible(b, de(b)) == "degradado":
+            counts["degradado"] += 1
+
+    # La flota siempre muestra primero lo que necesita atención.
+    orden = sorted(bots, key=lambda b: (_PRIORIDAD[_estado_visible(b, de(b))], b.environment.value, b.bot_id))
+    flota = "".join(_fila_bot(b, de(b), now) for b in orden) or _FLOTA_EMPTY
+
+    con_metricas = [b for b in orden if de(b) is not None]
+    agentes = "".join(_instrument(b, de(b)) for b in con_metricas) or _COCKPIT_EMPTY
+
+    abiertos = sum(1 for i in incidents if i.recovered_at is None)
+    ordenados = sorted(incidents, key=lambda i: i.recovered_at is not None)
+    return {
+        "veredicto": _verdict(bots, incidents, counts),
+        "vitales": _vitales(counts, abiertos),
+        "flota": flota,
+        "total-flota": _plural(counts["total"], "bot"),
+        "agentes": agentes,
+        "total-agentes": _plural(len(con_metricas), "agente"),
+        "incidentes": "".join(_incident_row(i, now) for i in ordenados) or _INCIDENTS_EMPTY,
+        "total-incidentes": _plural(len(incidents), "evento"),
+        "titulo": (f"({counts['offline']}) " if counts["offline"] else "") + "Watchdog · Mission Control",
+        "generado": now.strftime("%H:%M:%S"),
+    }
 
 
 @dashboard_router.get("/dashboard", response_class=HTMLResponse, tags=["Dashboard"])
 async def dashboard() -> HTMLResponse:
-    bots = await container.bot_repo.find_all()
-    incidents = await container.incident_repo.find_all(limit=30)
-    latest = await container.health_repo.find_latest_all()
-
-    metrics_by_key = {(m.bot_id, m.environment.value): m for m in latest}
-    ai_keys = set(metrics_by_key.keys())
-
-    counts = {"online": 0, "offline": 0, "unknown": 0}
-    for b in bots:
-        counts[b.status.value] = counts.get(b.status.value, 0) + 1
-    total = len(bots)
-    now = utcnow()
-
-    # Matrix — outages first for fastest glance
-    prio = {"offline": 0, "unknown": 1, "online": 2}
-    matrix_bots = sorted(bots, key=lambda b: (prio.get(b.status.value, 3), b.environment.value, b.bot_id))
-    matrix = "".join(_tile(b, (b.bot_id, b.environment.value) in ai_keys) for b in matrix_bots) or (
-        '<div class="empty" style="grid-column:1/-1"><div class="t">Sin bots registrados</div>'
-        '<div class="s">Esperando el primer heartbeat.</div></div>'
-    )
-
-    # Cockpit — AI agents (those reporting health), worst state first
-    instruments = []
-    for b in bots:
-        m = metrics_by_key.get((b.bot_id, b.environment.value))
-        if m is None:
-            continue
-        rank = 0 if b.status == BotStatus.OFFLINE else (1 if _is_anomaly(m) else 2)
-        instruments.append((rank, _instrument(b, m)))
-    instruments.sort(key=lambda x: x[0])
-    cockpit = "".join(h for _, h in instruments) or _COCKPIT_EMPTY
-    ai_count = len(instruments)
-
-    # Fleet table — stable order
-    fleet_bots = sorted(bots, key=lambda b: (b.environment.value, b.bot_id))
-    fleet_rows = "".join(_fleet_row(b, (b.bot_id, b.environment.value) in ai_keys) for b in fleet_bots)
-
-    incident_rows = "".join(_incident_row(i, now) for i in incidents) if incidents else _INCIDENTS_EMPTY
-
-    replacements = {
-        "%%VERDICT%%": _verdict(bots, incidents, counts),
-        "%%STAT_TOTAL%%": str(total),
-        "%%STAT_ONLINE%%": str(counts["online"]),
-        "%%STAT_OFFLINE%%": str(counts["offline"]),
-        "%%STAT_UNKNOWN%%": str(counts["unknown"]),
-        "%%OFFLINE_ALERT%%": "alert" if counts["offline"] > 0 else "",
-        "%%GENERATED_AT%%": now.strftime("%Y-%m-%d %H:%M:%S"),
-        "%%MATRIX%%": matrix,
-        "%%AI_COUNT%%": f"{ai_count} agente" + ("s" if ai_count != 1 else ""),
-        "%%COCKPIT%%": cockpit,
-        "%%FLEET_COUNT%%": f"{total} bot" + ("s" if total != 1 else ""),
-        "%%FLEET_ROWS%%": fleet_rows,
-        "%%INCIDENT_COUNT%%": f"{len(incidents)} evento" + ("s" if len(incidents) != 1 else ""),
-        "%%INCIDENTS%%": incident_rows,
-    }
+    regiones = await _regiones()
     html = _TEMPLATE
-    for token, value in replacements.items():
-        html = html.replace(token, value)
+    for clave, valor in regiones.items():
+        html = html.replace(f"%%{clave.upper().replace('-', '_')}%%", valor)
     return HTMLResponse(content=html)
+
+
+@dashboard_router.get("/dashboard/estado", tags=["Dashboard"])
+async def dashboard_estado() -> JSONResponse:
+    return JSONResponse(await _regiones(), headers={"Cache-Control": "no-store"})
+
+
+@dashboard_router.get("/dashboard/fuentes/{archivo}", include_in_schema=False)
+async def dashboard_fuente(archivo: str) -> FileResponse:
+    if archivo not in _FUENTES_PERMITIDAS:
+        raise HTTPException(status_code=404)
+    return FileResponse(_FUENTES / archivo, media_type="font/woff2",
+                        headers={"Cache-Control": "public, max-age=604800"})
 
 
 _TEMPLATE = r"""<!DOCTYPE html>
@@ -273,425 +289,221 @@ _TEMPLATE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Watchdog — Sala de Control de Flota</title>
+<title>%%TITULO%%</title>
+<noscript><meta http-equiv="refresh" content="30"></noscript>
 <style>
+  @font-face { font-family: "Geist"; src: url("/dashboard/fuentes/geist.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
+  @font-face { font-family: "Geist Mono"; src: url("/dashboard/fuentes/geist-mono.woff2") format("woff2"); font-weight: 100 900; font-display: swap; }
+
   :root {
-    --void:    #06080d;
-    --bg:      #0a0e15;
-    --rail:    #0c111a;
-    --panel:   #0f141e;
-    --panel-2: #131a26;
-    --raise:   #18202e;
-    --line:    #1d2632;
-    --line-2:  #283344;
-    --hair:    rgba(140,160,190,.07);
-
-    --txt:   #e8eef7;
-    --txt-2: #92a0b6;
-    --txt-3: #586577;
-    --txt-4: #3a4555;
-
-    --ok:   #34d27b;  --ok-d:  #1f8f54;  --ok-s:  rgba(52,210,123,.13);  --ok-l: rgba(52,210,123,.34);
-    --crit: #ff5a52;  --crit-d:#c0322c;  --crit-s:rgba(255,90,82,.14);   --crit-l:rgba(255,90,82,.42);
-    --warn: #ffb429;  --warn-d:#b97e10;  --warn-s:rgba(255,180,41,.13);  --warn-l:rgba(255,180,41,.36);
-    --info: #58a6ff;  --info-s:rgba(88,166,255,.13);  --info-l:rgba(88,166,255,.32);
-    --neut: #6f7d92;  --neut-s:rgba(111,125,146,.16);
-
-    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+    color-scheme: dark;
+    --fondo: #0a0a0a; --panel: #141414; --panel-2: #1c1c1c; --linea: #2a2a2a;
+    --texto: #fff; --suave: #a8a8a8; --tenue: #8a8a8a;
+    --ok: #c8f031; --crit: #ff7a6b; --crit-fondo: #2c1310; --warn: #ffb429; --warn-fondo: #2b2009;
+    --sans: "Geist", system-ui, sans-serif; --mono: "Geist Mono", ui-monospace, Consolas, monospace;
   }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--fondo); color: var(--texto); font: 400 14px/1.45 var(--sans); -webkit-font-smoothing: antialiased; }
+  h1, h2, p, ul, dl, dd { margin: 0; padding: 0; }
+  ul { list-style: none; }
+  svg { width: 15px; height: 15px; flex: none; }
 
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  html { font-size: 16px; }
-  body {
-    background: var(--bg);
-    color: var(--txt);
-    font-family: var(--sans);
-    line-height: 1.45;
-    -webkit-font-smoothing: antialiased;
-    font-feature-settings: "tnum" 1;
+  .pagina { max-width: 1400px; margin: 0 auto; padding: 0 22px 22px; }
+
+  .barra { display: flex; align-items: center; justify-content: space-between; gap: 12px; height: 52px; }
+  .marca { display: flex; align-items: center; gap: 10px; }
+  .marca-logo { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: var(--ok); color: #0a0a0a; }
+  .marca h1 { font-size: 16px; font-weight: 650; letter-spacing: -.02em; }
+  .marca span { color: var(--tenue); font: 12px var(--mono); }
+  .vivo { display: flex; align-items: center; gap: 8px; color: var(--suave); font: 12px var(--mono); }
+  .vivo i { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); animation: pulso 1.8s infinite; }
+  .vivo.sin-conexion { color: var(--crit); }
+  .vivo.sin-conexion i { background: var(--crit); animation: none; }
+  @keyframes pulso { 50% { opacity: .3; } }
+
+  /* Franja de estado: lo primero y más grande de la página. */
+  .estado-general { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 24px; padding: 16px 20px; border: 1px solid var(--linea); border-radius: 14px; background: var(--panel); transition: background-color .3s, border-color .3s; }
+  .estado-general:has(.veredicto.crit) { background: var(--crit-fondo); border-color: var(--crit); }
+  .estado-general:has(.veredicto.warn) { background: var(--warn-fondo); border-color: #6e5114; }
+  .veredicto { display: flex; align-items: center; gap: 14px; min-width: 0; }
+  .veredicto-ico { display: grid; place-items: center; flex: none; width: 46px; height: 46px; border-radius: 50%; background: var(--ok); color: #0a0a0a; }
+  .veredicto-ico svg { width: 22px; height: 22px; }
+  .veredicto.crit .veredicto-ico { background: var(--crit); }
+  .veredicto.warn .veredicto-ico { background: var(--warn); }
+  .veredicto-estado { font-size: 28px; line-height: 1.15; font-weight: 650; letter-spacing: -.03em; }
+  .veredicto-desc { color: var(--suave); }
+  .veredicto-desc b { color: var(--texto); font-weight: 550; }
+  .vitales { display: grid; grid-template-columns: repeat(4, auto); gap: 30px; }
+  .vital dt { color: var(--suave); font: 12px var(--mono); white-space: nowrap; }
+  .vital dd { font: 600 26px/1.15 var(--mono); }
+  .vital small { color: var(--tenue); font-size: 15px; font-weight: 400; }
+  .vital.crit dd { color: var(--crit); }
+  .vital.warn dd { color: var(--warn); }
+
+  .rejilla { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); gap: 14px; margin-top: 14px; align-items: start; }
+  .panel { min-width: 0; padding: 14px 16px; border: 1px solid var(--linea); border-radius: 14px; background: var(--panel); }
+  .panel-titulo { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+  .panel-titulo h2 { font-size: 15px; font-weight: 600; }
+  .panel-titulo span { color: var(--tenue); font: 12px var(--mono); }
+
+  .bot { display: grid; grid-template-columns: 116px minmax(0, 1fr) 76px 112px; align-items: center; gap: 12px; min-height: 46px; padding: 6px 8px; border-top: 1px solid #222; border-radius: 6px; }
+  .bot:first-child { border-top: 0; }
+  .bot.s-offline { background: var(--crit-fondo); border-color: transparent; }
+  .bot.s-degradado { background: var(--warn-fondo); border-color: transparent; }
+  .bot.destello { animation: destello 2.4s ease-out; }
+  @keyframes destello { 0%, 30% { outline: 2px solid currentColor; outline-offset: -2px; color: var(--crit); } 100% { outline: 2px solid transparent; outline-offset: -2px; } }
+  .bot.destello-ok { animation: destello-ok 2.4s ease-out; }
+  @keyframes destello-ok { 0%, 30% { outline: 2px solid var(--ok); outline-offset: -2px; } 100% { outline: 2px solid transparent; outline-offset: -2px; } }
+  .estado { display: inline-flex; align-items: center; gap: 6px; font-weight: 550; font-size: 13px; white-space: nowrap; }
+  .e-online { color: var(--ok); } .e-offline { color: var(--crit); } .e-degradado { color: var(--warn); } .e-unknown { color: var(--suave); }
+  .bot-datos { min-width: 0; line-height: 1.3; }
+  .bot-id { font: 500 14px var(--mono); }
+  .bot-nombre { display: block; overflow: hidden; color: var(--suave); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+  .marca-ia { margin-left: 7px; padding: 0 5px; border: 1px solid #444; border-radius: 4px; color: var(--suave); font: 11px var(--mono); vertical-align: 1px; }
+  .env { color: var(--suave); font: 12px var(--mono); }
+  .visto { color: var(--suave); font: 12px var(--mono); text-align: right; white-space: nowrap; }
+
+  .incidentes { max-height: 300px; overflow-y: auto; }
+  .incidente { display: flex; justify-content: space-between; gap: 12px; padding: 8px 2px; border-top: 1px solid #222; }
+  .incidente:first-child { border-top: 0; }
+  .incidente.abierto { margin: 0 -6px; padding-inline: 8px; border: 0; border-radius: 6px; background: var(--crit-fondo); }
+  .incidente .env { margin-left: 7px; }
+  .incidente-hora { color: var(--tenue); font: 12px var(--mono); }
+  .incidente-fin { display: grid; justify-items: end; flex: none; }
+  .incidente-dur { color: var(--suave); font: 12px var(--mono); }
+
+  .agentes { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; margin-top: 8px; }
+  .instr { padding: 12px 14px; border: 1px solid var(--linea); border-radius: 10px; background: var(--panel-2); }
+  .instr.anomaly { border-color: #6e5114; }
+  .instr.down { border-color: var(--crit); }
+  .instr-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+  .instr-nombre { font-weight: 600; }
+  .instr-id { color: var(--suave); font: 12px var(--mono); }
+  .gauges { display: grid; gap: 7px; }
+  .gauge { display: grid; grid-template-columns: 88px 1fr 72px; align-items: center; gap: 10px; }
+  .g-lbl { color: var(--suave); font-size: 13px; }
+  .g-track { height: 5px; border-radius: 5px; background: #303030; overflow: hidden; }
+  .g-fill { display: block; height: 100%; border-radius: 5px; background: var(--ok); transition: width .4s; }
+  .gauge.warn .g-fill { background: var(--warn); } .gauge.crit .g-fill { background: var(--crit); } .gauge.dead .g-fill { background: #444; }
+  .g-val { font: 500 13px var(--mono); text-align: right; }
+  .g-val small { color: var(--suave); font-size: 12px; }
+  .instr-nota { margin-top: 8px; color: var(--suave); font-size: 13px; }
+
+  .vacio { display: grid; justify-items: center; gap: 2px; grid-column: 1 / -1; padding: 22px 8px; color: var(--suave); text-align: center; }
+  .vacio .t { color: var(--texto); font-weight: 550; }
+  .vacio-ico svg { width: 22px; height: 22px; color: var(--ok); }
+
+  .pie { display: flex; justify-content: space-between; gap: 12px; margin-top: 12px; color: var(--tenue); font: 12px var(--mono); }
+
+  @media (max-width: 1040px) {
+    .rejilla, .estado-general { grid-template-columns: minmax(0, 1fr); }
   }
-  :focus-visible { outline: 2px solid var(--info); outline-offset: 2px; border-radius: 3px; }
-  .mono { font-family: var(--mono); }
-
-  .app {
-    display: grid;
-    grid-template-columns: 272px 1fr;
-    min-height: 100vh;
-  }
-
-  .rail {
-    background: var(--rail);
-    border-right: 1px solid var(--line-2);
-    display: flex; flex-direction: column;
-    position: sticky; top: 0; height: 100vh;
-    overflow-y: auto;
-  }
-  .rail-brand {
-    display: flex; align-items: center; gap: 12px;
-    padding: 18px 20px; border-bottom: 1px solid var(--line);
-  }
-  .brand-mark {
-    width: 40px; height: 40px; border-radius: 10px; flex: none;
-    display: grid; place-items: center;
-    background: linear-gradient(150deg, var(--raise), #0a0f17);
-    border: 1px solid var(--line-2);
-    box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
-  }
-  .brand-mark svg { width: 23px; height: 23px; }
-  .brand-name { font-size: 1rem; font-weight: 800; letter-spacing: .18em; }
-  .brand-tag { font-size: .64rem; color: var(--txt-3); letter-spacing: .1em; text-transform: uppercase; margin-top: 2px; font-family: var(--mono); }
-
-  .verdict {
-    margin: 16px; border-radius: 12px; padding: 18px 16px;
-    border: 1px solid var(--line-2); background: var(--panel);
-    position: relative; overflow: hidden;
-  }
-  .verdict::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 4px; }
-  .verdict.crit { background: linear-gradient(160deg, var(--crit-s), var(--panel) 60%); border-color: var(--crit-l); }
-  .verdict.crit::before { background: var(--crit); box-shadow: 0 0 20px var(--crit); }
-  .verdict.warn { background: linear-gradient(160deg, var(--warn-s), var(--panel) 60%); border-color: var(--warn-l); }
-  .verdict.warn::before { background: var(--warn); box-shadow: 0 0 20px var(--warn); }
-  .verdict.ok::before { background: var(--ok); box-shadow: 0 0 20px var(--ok); }
-  .verdict-top { display: flex; align-items: center; gap: 9px; }
-  .verdict-ico { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; flex: none; }
-  .verdict.crit .verdict-ico { background: var(--crit-s); color: var(--crit); }
-  .verdict.warn .verdict-ico { background: var(--warn-s); color: var(--warn); }
-  .verdict.ok   .verdict-ico { background: var(--ok-s); color: var(--ok); }
-  .verdict-ico svg { width: 19px; height: 19px; }
-  .verdict-kicker { font-size: .6rem; letter-spacing: .16em; text-transform: uppercase; color: var(--txt-3); font-family: var(--mono); }
-  .verdict-state { font-size: 1.04rem; font-weight: 800; letter-spacing: -.01em; line-height: 1.1; margin-top: 1px; }
-  .verdict.crit .verdict-state { color: #ff8b85; }
-  .verdict.warn .verdict-state { color: var(--warn); }
-  .verdict.ok   .verdict-state { color: var(--ok); }
-  .verdict-desc { font-size: .76rem; color: var(--txt-2); margin-top: 12px; }
-  .verdict-desc b { color: var(--txt); font-family: var(--mono); }
-
-  .vitals { padding: 0 16px; display: flex; flex-direction: column; gap: 8px; }
-  .vital {
-    display: flex; align-items: center; gap: 12px;
-    padding: 12px 14px; border-radius: 10px;
-    border: 1px solid var(--line); background: var(--panel);
-    position: relative;
-  }
-  .vital-ico { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; flex: none; }
-  .vital-ico svg { width: 16px; height: 16px; }
-  .vital[data-tone="total"]   .vital-ico { background: var(--neut-s); color: var(--txt-2); }
-  .vital[data-tone="online"]  .vital-ico { background: var(--ok-s);   color: var(--ok); }
-  .vital[data-tone="offline"] .vital-ico { background: var(--crit-s); color: var(--crit); }
-  .vital[data-tone="unknown"] .vital-ico { background: var(--warn-s); color: var(--warn); }
-  .vital-label { flex: 1; font-size: .72rem; text-transform: uppercase; letter-spacing: .1em; color: var(--txt-2); font-weight: 600; }
-  .vital-num { font-family: var(--mono); font-size: 1.7rem; font-weight: 800; line-height: 1; letter-spacing: -.02em; }
-  .vital[data-tone="total"]   .vital-num { color: var(--txt); }
-  .vital[data-tone="online"]  .vital-num { color: var(--ok); }
-  .vital[data-tone="offline"] .vital-num { color: var(--crit); }
-  .vital[data-tone="unknown"] .vital-num { color: var(--warn); }
-  .vital[data-tone="offline"].alert { border-color: var(--crit-l); animation: vitalpulse 2.6s infinite; }
-  @keyframes vitalpulse { 0%,100% { box-shadow: 0 0 0 0 rgba(255,90,82,0); } 50% { box-shadow: 0 0 0 3px rgba(255,90,82,.09); } }
-
-  .rail-foot { margin-top: auto; padding: 16px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
-  .clock-lbl { font-size: .58rem; letter-spacing: .16em; text-transform: uppercase; color: var(--txt-3); font-family: var(--mono); }
-  .clock-val { font-family: var(--mono); font-size: .82rem; color: var(--txt-2); }
-  .clock-val b { color: var(--txt); }
-  .live {
-    display: inline-flex; align-items: center; gap: 8px; align-self: flex-start;
-    font-family: var(--mono); font-size: .68rem; font-weight: 700; letter-spacing: .06em;
-    color: var(--ok); padding: 6px 11px; border-radius: 999px;
-    background: var(--ok-s); border: 1px solid var(--ok-l);
-  }
-  .beacon { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 0 rgba(52,210,123,.6); animation: beacon 2.4s infinite; }
-  @keyframes beacon { 0% { box-shadow: 0 0 0 0 rgba(52,210,123,.5); } 70% { box-shadow: 0 0 0 7px rgba(52,210,123,0); } 100% { box-shadow: 0 0 0 0 rgba(52,210,123,0); } }
-
-  .board {
-    background:
-      linear-gradient(var(--hair) 1px, transparent 1px),
-      linear-gradient(90deg, var(--hair) 1px, transparent 1px),
-      radial-gradient(900px 500px at 90% -8%, rgba(88,166,255,.05), transparent 60%),
-      var(--bg);
-    background-size: 38px 38px, 38px 38px, 100% 100%, 100% 100%;
-    padding: 24px clamp(18px, 2.4vw, 36px) 40px;
-    min-width: 0;
-  }
-
-  .sec { margin-top: 30px; }
-  .sec:first-child { margin-top: 4px; }
-  .sec-head { display: flex; align-items: center; gap: 13px; margin-bottom: 14px; }
-  .sec-head h2 { font-size: .78rem; font-weight: 700; text-transform: uppercase; letter-spacing: .17em; color: var(--txt-2); display: flex; align-items: center; gap: 9px; white-space: nowrap; }
-  .sec-head h2 svg { width: 15px; height: 15px; color: var(--txt-3); }
-  .sec-head .rule { flex: 1; height: 1px; background: repeating-linear-gradient(90deg, var(--line-2) 0 6px, transparent 6px 12px); }
-  .sec-head .tag { font-family: var(--mono); font-size: .68rem; color: var(--txt-3); border: 1px solid var(--line); padding: 3px 10px; border-radius: 6px; white-space: nowrap; }
-
-  .matrix { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
-  .tile {
-    position: relative; border-radius: 12px; padding: 14px;
-    background: var(--panel); border: 1px solid var(--line-2); overflow: hidden;
-  }
-  .tile::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; }
-  .tile.s-online::before  { background: var(--ok); }
-  .tile.s-offline::before { background: var(--crit); box-shadow: 0 0 16px var(--crit); }
-  .tile.s-unknown::before { background: var(--warn); }
-  .tile.s-offline { border-color: var(--crit-l); background: linear-gradient(180deg, var(--crit-s), var(--panel) 70%); }
-  .tile-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  .tile-status { display: inline-flex; align-items: center; gap: 7px; font-size: .68rem; font-weight: 800; letter-spacing: .08em; }
-  .tile.s-online  .tile-status { color: var(--ok); }
-  .tile.s-offline .tile-status { color: #ff8b85; }
-  .tile.s-unknown .tile-status { color: var(--warn); }
-  .tile-status svg { width: 13px; height: 13px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-  .dot-online { background: var(--ok); animation: beacon 2.4s infinite; }
-  .dot-offline { background: var(--crit); box-shadow: 0 0 7px var(--crit); }
-  .dot-unknown { background: var(--warn); }
-  .agent-chip { font-family: var(--mono); font-size: .58rem; font-weight: 700; letter-spacing: .06em; color: var(--info); background: var(--info-s); border: 1px solid var(--info-l); padding: 2px 6px; border-radius: 5px; }
-  .tile-id { font-family: var(--mono); font-size: .92rem; font-weight: 700; margin-top: 11px; color: var(--txt); }
-  .tile-name { font-size: .76rem; color: var(--txt-2); margin-top: 2px; }
-  .tile-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; }
-  .env { font-family: var(--mono); font-size: .64rem; font-weight: 700; padding: 2px 7px; border-radius: 5px; border: 1px solid transparent; }
-  .env::before { content: "›"; opacity: .5; margin-right: 3px; }
-  .env-prod    { background: var(--info-s); color: var(--info); border-color: var(--info-l); }
-  .env-staging { background: var(--warn-s); color: var(--warn); border-color: var(--warn-l); }
-  .env-dev     { background: var(--neut-s); color: var(--txt-2); border-color: var(--line-2); }
-
-  .panel { background: var(--panel); border: 1px solid var(--line-2); border-radius: 12px; overflow: hidden; }
-  .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  table { width: 100%; border-collapse: collapse; font-size: .85rem; min-width: 720px; }
-  caption { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-  thead th { background: var(--panel-2); color: var(--txt-3); font-weight: 600; text-align: left; padding: 11px 16px; border-bottom: 1px solid var(--line-2); font-size: .65rem; text-transform: uppercase; letter-spacing: .1em; white-space: nowrap; }
-  tbody td { padding: 12px 16px; border-bottom: 1px solid var(--line); vertical-align: middle; white-space: nowrap; }
-  tbody tr:last-child td { border-bottom: none; }
-  tbody tr { transition: background .12s; }
-  tbody tr:hover td { background: rgba(140,160,190,.04); }
-  tbody tr.row-crit td { background: rgba(255,90,82,.05); }
-  tbody tr.row-crit:hover td { background: rgba(255,90,82,.08); }
-  .bot-id { font-family: var(--mono); font-size: .8rem; color: var(--txt); background: var(--raise); border: 1px solid var(--line-2); padding: 3px 8px; border-radius: 6px; }
-  .bot-name { font-weight: 500; }
-  .ts { font-family: var(--mono); font-size: .78rem; color: var(--txt-2); }
-  .ts.dim { color: var(--txt-3); }
-  .agent-flag { display: inline-flex; align-items: center; gap: 4px; font-size: .62rem; font-weight: 700; letter-spacing: .05em; color: var(--info); margin-left: 7px; }
-  .agent-flag svg { width: 11px; height: 11px; }
-
-  .badge { display: inline-flex; align-items: center; gap: 7px; padding: 4px 11px 4px 9px; border-radius: 999px; font-size: .71rem; font-weight: 700; letter-spacing: .04em; border: 1px solid transparent; white-space: nowrap; }
-  .badge svg { width: 13px; height: 13px; flex: none; }
-  .badge-online  { background: var(--ok-s); color: var(--ok); border-color: var(--ok-l); }
-  .badge-offline { background: var(--crit-s); color: #ff8b85; border-color: var(--crit-l); }
-  .badge-unknown { background: var(--warn-s); color: var(--warn); border-color: var(--warn-l); }
-
-  .pill { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: .69rem; font-weight: 700; letter-spacing: .05em; padding: 3px 9px; border-radius: 6px; border: 1px solid transparent; }
-  .pill svg { width: 11px; height: 11px; }
-  .pill-active { background: var(--crit-s); color: #ff8b85; border-color: var(--crit-l); }
-  .pill-recovered { background: var(--ok-s); color: var(--ok); border-color: var(--ok-l); }
-  .downtime { font-family: var(--mono); font-weight: 700; }
-  .downtime-open { color: var(--crit); }
-  .downtime-done { color: var(--txt-2); }
-
-  .empty { padding: 44px 24px; text-align: center; }
-  .empty .ico { width: 46px; height: 46px; margin: 0 auto 12px; border-radius: 12px; display: grid; place-items: center; background: var(--ok-s); color: var(--ok); }
-  .empty .ico svg { width: 24px; height: 24px; }
-  .empty .t { font-size: .98rem; font-weight: 650; }
-  .empty .s { font-size: .82rem; color: var(--txt-3); margin-top: 4px; }
-
-  #ai-health { scroll-margin-top: 20px; }
-  .cockpit { display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); }
-  .instr { background: var(--panel); border: 1px solid var(--line-2); border-radius: 12px; padding: 16px 18px; position: relative; overflow: hidden; }
-  .instr::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: var(--neut); }
-  .instr.anomaly::before { background: var(--warn); }
-  .instr.down::before { background: var(--crit); box-shadow: 0 0 16px var(--crit); }
-  .instr-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 15px; }
-  .instr-id { display: flex; align-items: center; gap: 10px; min-width: 0; }
-  .instr-id .mk { width: 32px; height: 32px; border-radius: 8px; flex: none; display: grid; place-items: center; background: var(--info-s); color: var(--info); }
-  .instr-id .mk svg { width: 18px; height: 18px; }
-  .instr-id .n { font-weight: 650; font-size: .9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .instr-id .i { font-family: var(--mono); font-size: .68rem; color: var(--txt-3); }
-  .state-chip { font-family: var(--mono); font-size: .62rem; font-weight: 800; letter-spacing: .07em; padding: 4px 9px; border-radius: 6px; white-space: nowrap; }
-  .state-chip.ok { background: var(--ok-s); color: var(--ok); }
-  .state-chip.degraded { background: var(--warn-s); color: var(--warn); }
-  .state-chip.down { background: var(--crit-s); color: #ff8b85; }
-
-  .gauges { display: flex; flex-direction: column; gap: 11px; }
-  .gauge { display: grid; grid-template-columns: 92px 1fr 74px; align-items: center; gap: 11px; }
-  .gauge .g-lbl { font-size: .64rem; text-transform: uppercase; letter-spacing: .06em; color: var(--txt-3); }
-  .gauge .g-track { height: 7px; border-radius: 4px; background: var(--raise); overflow: hidden; position: relative; }
-  .gauge .g-fill { position: absolute; inset: 0 auto 0 0; border-radius: 4px; background: var(--ok); }
-  .gauge.warn .g-fill { background: var(--warn); }
-  .gauge.crit .g-fill { background: var(--crit); }
-  .gauge.dead .g-fill { background: var(--txt-4); }
-  .gauge .g-val { font-family: var(--mono); font-size: .82rem; font-weight: 700; text-align: right; color: var(--txt); }
-  .gauge .g-val small { color: var(--txt-3); font-weight: 600; font-size: .64rem; }
-  .gauge.warn .g-val { color: var(--warn); }
-  .gauge.crit .g-val { color: var(--crit); }
-  .gauge.dead .g-val { color: var(--txt-3); }
-  .instr-note { font-size: .72rem; color: var(--txt-3); margin-top: 13px; display: flex; align-items: center; gap: 7px; padding-top: 12px; border-top: 1px solid var(--line); }
-  .instr-note.crit { color: #ff8b85; }
-  .instr-note.warn { color: var(--warn); }
-  .instr-note svg { width: 13px; height: 13px; flex: none; }
-  .ai-toggle { display: inline-flex; align-items: center; gap: 7px; font-size: .68rem; font-family: var(--mono); color: var(--txt-3); border: 1px solid var(--line); background: var(--panel-2); padding: 4px 10px; border-radius: 7px; cursor: pointer; }
-  .ai-toggle:hover { color: var(--txt-2); border-color: var(--line-2); }
-
-  .board-foot { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-  .foot-note { font-size: .76rem; color: var(--txt-3); display: flex; align-items: center; gap: 8px; }
-  .foot-note svg { width: 14px; height: 14px; }
-  .foot-meta { font-family: var(--mono); font-size: .7rem; color: var(--txt-4); }
-
-  @media (max-width: 960px) {
-    .app { grid-template-columns: 1fr; }
-    .rail { position: static; height: auto; flex-direction: column; }
-    .rail-brand { border-bottom: 1px solid var(--line); }
-    .verdict { margin: 14px 16px; }
-    .vitals { flex-direction: row; flex-wrap: wrap; }
-    .vital { flex: 1; min-width: 150px; }
-    .rail-foot { margin-top: 0; flex-direction: row; align-items: center; justify-content: space-between; }
-  }
-  @media (max-width: 540px) {
-    .vital { min-width: 130px; }
-    .matrix { grid-template-columns: 1fr; }
+  @media (max-width: 640px) {
+    .pagina { padding-inline: 14px; }
+    .vitales { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .veredicto-estado { font-size: 23px; }
+    .bot { grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; }
+    .bot .env, .bot .visto { grid-row: 2; }
+    .bot .bot-datos { grid-column: 1 / -1; grid-row: 3; }
+    .agentes { grid-template-columns: minmax(0, 1fr); }
   }
   @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after { animation: none !important; }
+    *, *::before, *::after { animation: none !important; transition: none !important; }
   }
 </style>
 </head>
 <body>
-<div class="app">
+<div class="pagina">
+  <header class="barra">
+    <div class="marca">
+      <span class="marca-logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 5v6c0 4.4 3.2 8.3 8 9.5 4.8-1.2 8-5.1 8-9.5V5l-8-3Z"/><path d="m9 11.5 2 2 4-4.5"/></svg></span>
+      <h1>Watchdog</h1>
+      <span>Mission Control</span>
+    </div>
+    <p class="vivo" id="vivo" role="status"><i aria-hidden="true"></i><span id="vivo-texto">En vivo · <span id="generado">%%GENERADO%%</span> UTC</span></p>
+  </header>
 
-  <aside class="rail">
-    <div class="rail-brand">
-      <div class="brand-mark" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="#92a0b6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 2 4 5v6c0 4.4 3.2 8.3 8 9.5 4.8-1.2 8-5.1 8-9.5V5l-8-3Z"/><path d="M9 11.5l2 2 4-4.5"/>
-        </svg>
-      </div>
-      <div>
-        <div class="brand-name">WATCHDOG</div>
-        <div class="brand-tag">Mission Control</div>
-      </div>
+  <main>
+    <section class="estado-general" aria-label="Estado de la flota">
+      <div id="global-health" role="status" aria-live="polite" data-region="veredicto">%%VEREDICTO%%</div>
+      <dl class="vitales" data-region="vitales">%%VITALES%%</dl>
+    </section>
+
+    <div class="rejilla">
+      <section class="panel" aria-labelledby="t-flota">
+        <div class="panel-titulo"><h2 id="t-flota">Flota</h2><span data-region="total-flota">%%TOTAL_FLOTA%%</span></div>
+        <ul data-region="flota">%%FLOTA%%</ul>
+      </section>
+      <section class="panel" aria-labelledby="t-incidentes">
+        <div class="panel-titulo"><h2 id="t-incidentes">Incidentes</h2><span data-region="total-incidentes">%%TOTAL_INCIDENTES%%</span></div>
+        <ul class="incidentes" data-region="incidentes">%%INCIDENTES%%</ul>
+      </section>
     </div>
 
-    %%VERDICT%%
-
-    <div class="vitals" aria-label="Resumen de la flota">
-      <div class="vital" data-tone="total">
-        <span class="vital-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span>
-        <span class="vital-label">Total</span>
-        <span class="vital-num" id="stat-total">%%STAT_TOTAL%%</span>
-      </div>
-      <div class="vital" data-tone="online">
-        <span class="vital-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
-        <span class="vital-label">Online</span>
-        <span class="vital-num" id="stat-online">%%STAT_ONLINE%%</span>
-      </div>
-      <div class="vital %%OFFLINE_ALERT%%" data-tone="offline">
-        <span class="vital-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg></span>
-        <span class="vital-label">Offline</span>
-        <span class="vital-num" id="stat-offline">%%STAT_OFFLINE%%</span>
-      </div>
-      <div class="vital" data-tone="unknown">
-        <span class="vital-ico" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 4.5 1.5c0 1.7-2.5 2-2.5 3.5"/><path d="M12 17h.01"/></svg></span>
-        <span class="vital-label">Unknown</span>
-        <span class="vital-num" id="stat-unknown">%%STAT_UNKNOWN%%</span>
-      </div>
-    </div>
-
-    <div class="rail-foot">
-      <div>
-        <div class="clock-lbl">Generado · UTC</div>
-        <div class="clock-val"><b id="generated-timestamp">%%GENERATED_AT%%</b></div>
-      </div>
-      <span class="live" title="Actualización automática cada 30 segundos">
-        <span class="beacon" aria-hidden="true"></span> LIVE · 30s
-      </span>
-    </div>
-  </aside>
-
-  <main class="board">
-
-    <section class="sec" aria-label="Flota — vista de mosaico">
-      <div class="sec-head">
-        <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg> Matriz de la Flota</h2>
-        <div class="rule"></div>
-        <span class="tag">vistazo rápido</span>
-      </div>
-      <div class="matrix">%%MATRIX%%</div>
+    <section class="panel" id="ai-health" style="margin-top:14px" aria-labelledby="t-agentes">
+      <div class="panel-titulo"><h2 id="t-agentes">Cockpit · Salud de agentes de IA</h2><span data-region="total-agentes">%%TOTAL_AGENTES%%</span></div>
+      <div class="agentes" data-region="agentes">%%AGENTES%%</div>
     </section>
-
-    <section class="sec" id="ai-health" aria-label="Salud de agentes de IA">
-      <div class="sec-head">
-        <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="13" rx="2"/><path d="M12 7V4"/><circle cx="9" cy="13" r="1"/><circle cx="15" cy="13" r="1"/><path d="M9 17h6"/></svg> Cockpit · Salud de Agentes IA</h2>
-        <div class="rule"></div>
-        <span class="tag">%%AI_COUNT%%</span>
-        <button class="ai-toggle" id="ai-toggle" type="button" aria-expanded="true" aria-controls="cockpit">ocultar</button>
-      </div>
-      <div class="cockpit" id="cockpit">%%COCKPIT%%</div>
-    </section>
-
-    <section class="sec" aria-label="Estado de la flota (detalle)">
-      <div class="sec-head">
-        <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg> Estado de la Flota</h2>
-        <div class="rule"></div>
-        <span class="tag">%%FLEET_COUNT%%</span>
-      </div>
-      <div class="panel">
-        <div class="table-scroll">
-          <table>
-            <caption>Estado de la flota: una fila por bot</caption>
-            <thead>
-              <tr>
-                <th scope="col">Estado</th><th scope="col">Bot ID</th><th scope="col">Nombre</th>
-                <th scope="col">Entorno</th><th scope="col">Última vez visto (UTC)</th><th scope="col">Fecha de registro</th>
-              </tr>
-            </thead>
-            <tbody id="fleet-tbody">%%FLEET_ROWS%%</tbody>
-          </table>
-        </div>
-      </div>
-    </section>
-
-    <section class="sec" aria-label="Incidentes recientes">
-      <div class="sec-head">
-        <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-7 4 14 2-7h6"/></svg> Incidentes Recientes</h2>
-        <div class="rule"></div>
-        <span class="tag">%%INCIDENT_COUNT%%</span>
-      </div>
-      <div class="panel">
-        <div class="table-scroll">
-          <table>
-            <caption>Incidentes recientes: una fila por caída</caption>
-            <thead>
-              <tr>
-                <th scope="col">Bot ID</th><th scope="col">Entorno</th><th scope="col">Cuándo cayó (UTC)</th>
-                <th scope="col">Recuperado (UTC)</th><th scope="col">Downtime</th>
-              </tr>
-            </thead>
-            <tbody id="incidents-tbody">%%INCIDENTS%%</tbody>
-          </table>
-        </div>
-      </div>
-    </section>
-
-    <footer class="board-foot">
-      <div class="foot-note">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.2-8.5"/><path d="M21 3v6h-6"/></svg>
-        <span id="refresh-note">La página se actualiza automáticamente cada <b>30&nbsp;segundos</b>. Datos en tiempo real del servicio Watchdog.</span>
-      </div>
-      <div class="foot-meta">watchdog · mission control</div>
-    </footer>
-
   </main>
+
+  <footer class="pie"><span>Se actualiza solo cada 2 segundos</span><span>watchdog · mission control</span></footer>
 </div>
 
 <script>
   (function () {
     "use strict";
-    setTimeout(function () { location.reload(); }, 30000);
+    var INTERVALO = 2000;
+    var regiones = {};
+    document.querySelectorAll("[data-region]").forEach(function (el) {
+      regiones[el.dataset.region] = el;
+    });
+    var ultimo = {};
+    var molde = document.createElement("div");
+    var vivo = document.getElementById("vivo");
+    var vivoTexto = document.getElementById("vivo-texto");
 
-    var btn = document.getElementById("ai-toggle");
-    var grid = document.getElementById("cockpit");
-    if (btn && grid) {
-      btn.addEventListener("click", function () {
-        var hidden = grid.style.display === "none";
-        grid.style.display = hidden ? "" : "none";
-        btn.setAttribute("aria-expanded", String(hidden));
-        btn.textContent = hidden ? "ocultar" : "mostrar";
+    function estados() {
+      var mapa = {};
+      document.querySelectorAll(".bot").forEach(function (b) { mapa[b.dataset.bot] = b.dataset.estado; });
+      return mapa;
+    }
+
+    function resaltarCambios(antes) {
+      document.querySelectorAll(".bot").forEach(function (b) {
+        var previo = antes[b.dataset.bot];
+        if (!previo || previo === b.dataset.estado) return;
+        b.classList.add(b.dataset.estado === "online" ? "destello-ok" : "destello");
       });
     }
+
+    function aplicar(datos) {
+      var antes = estados();
+      Object.keys(regiones).forEach(function (clave) {
+        if (ultimo[clave] === datos[clave]) return;
+        // Compara ya normalizado por el navegador: si nada cambió, no repite el aviso de estado.
+        molde.innerHTML = datos[clave];
+        if (regiones[clave].innerHTML !== molde.innerHTML) regiones[clave].innerHTML = datos[clave];
+        ultimo[clave] = datos[clave];
+      });
+      document.title = datos.titulo;
+      resaltarCambios(antes);
+      vivo.classList.remove("sin-conexion");
+      vivoTexto.textContent = "En vivo · " + datos.generado + " UTC";
+    }
+
+    function consultar() {
+      if (document.hidden) { setTimeout(consultar, INTERVALO); return; }
+      fetch("/dashboard/estado", { cache: "no-store" })
+        .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+        .then(aplicar)
+        .catch(function () {
+          vivo.classList.add("sin-conexion");
+          vivoTexto.textContent = "Sin conexión · reintentando";
+        })
+        .finally(function () { setTimeout(consultar, INTERVALO); });
+    }
+
+    setTimeout(consultar, INTERVALO);
   })();
 </script>
 </body>

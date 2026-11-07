@@ -86,7 +86,8 @@ agentes existentes:
 | POST   | /heartbeat                 | Fallback HTTP — el bot reporta que está vivo       |
 | GET    | /status                    | Estado completo de la flota en JSON               |
 | GET    | /agents/{bot_id}/health    | Métricas de salud de IA recientes de un agente    |
-| GET    | /dashboard                 | Panel web con indicadores visuales                |
+| GET    | /dashboard                 | Panel web que se actualiza solo, sin recargar     |
+| GET    | /dashboard/estado          | Regiones del panel en JSON para la actualización  |
 | GET    | /health                    | Chequeo de vida del servicio                      |
 | GET    | /docs                      | Documentación interactiva de la API (Swagger UI)  |
 
@@ -162,7 +163,7 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-29 tests que cubren seguridad (HMAC, validación), escalabilidad (eliminación del
+91 pruebas que cubren seguridad (HMAC, validación), escalabilidad (eliminación del
 N+1), alertas (throttler), WebSocket y métricas de IA. No requieren servicios
 externos (usan SQLite + el TestClient ASGI).
 
@@ -200,3 +201,7 @@ columnas `TIMESTAMPTZ`. El esquema se crea automáticamente al arrancar.
 
 Para añadir otro backend (MySQL, etc.), implementa `IBotRepository` e
 `IIncidentRepository` y cablea en `infrastructure/container.py`.
+
+## Créditos
+
+El panel usa las fuentes Geist y Geist Mono (SIL Open Font License); la licencia está en `adapters/controllers/fuentes/`.
